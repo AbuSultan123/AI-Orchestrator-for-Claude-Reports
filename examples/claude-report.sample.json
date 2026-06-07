@@ -1,0 +1,42 @@
+{
+  "project": "TradingView Light v5 Lab",
+  "branch": "lwc-v5-2-lab",
+  "base_commit": "4abaf7a",
+  "status": "implemented + verified (build + browser). Uncommitted.",
+  "phase": "Phase 10",
+
+  "completed": [
+    "Master switch ?bpPrimitiveHybrid=1 added to BP_FLAGS in barPatternDebug.js",
+    "Move-feedback glow folded into primitive handles (no separate flag needed)",
+    "All granular flags rewired to OR in master; standalone behavior unchanged",
+    "No-flag legacy canvas path: unchanged, verified",
+    "Old full-stack URL with all 8 flags: still works, no regression",
+    "Transform 2x2: 44 canvases, all 4 panes, 0 leaks, 0 disposed errors",
+    "npm run build: 1591 modules transformed, 0 errors"
+  ],
+
+  "files_modified": [
+    "src/drawings/bar-pattern/barPatternDebug.js"
+  ],
+  "files_created": [],
+
+  "build_result": "passed (1591 modules, 0 errors, vite 5.4.21)",
+
+  "stable_components": [
+    "v4 folder: untouched",
+    "barPatternReducer: lock logic unchanged",
+    "Storage schemaVersion:3: unchanged",
+    "BarPatternCanvas.jsx: drag math ownership unchanged",
+    "barPatternPrimitive.js: unchanged",
+    "useBarPatternPrimitive.js: unchanged"
+  ],
+
+  "deferred": [
+    "Option C (default-on) behind kill-switch: deferred to Phase 11",
+    "Retire granular flags: deferred to Phase 11+",
+    "bpPrimitiveMoveFeedbackEnabled() alias cleanup: deferred",
+    "bpHitTestCompareEnabled(): intentionally NOT master-driven (debug-only)"
+  ],
+
+  "recommendation": "Add ?bpCanvasLegacy=1 as the inverse kill-switch and make the proven stack default-on. Gate on one human Transform 2x2 check of ?bpPrimitiveHybrid=1 first. Then flip bpPrimitiveHybridEnabled() to return true by default (unless bpCanvasLegacy is set). Ship with ?bpCanvasLegacy=1 available, watch for regressions, then retire granular flags in a follow-up."
+}

@@ -1,0 +1,29 @@
+# Runtime artifacts -- overwritten on every orchestrator run
+/NEXT_TASK.md
+/APPROVAL_REQUEST.md
+state/latest-report.md
+state/latest-decision.json
+state/NEXT_TASK.md
+state/APPROVAL_REQUEST.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+.pytest_cache/
+venv/
+.venv/
+*.egg-info/
+
+# Claude Code local workspace settings (machine-specific)
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+.vscode/
+.idea/

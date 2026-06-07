@@ -1,0 +1,3 @@
+# AI Orchestrator v0.1 -- no external dependencies required.
+# Python 3.8+ standard library only.
+# No ANTHROPIC_API_KEY or any other credential needed.

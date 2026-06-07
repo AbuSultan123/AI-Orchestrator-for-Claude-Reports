@@ -1,0 +1,118 @@
+{
+  "version": "0.2-lite",
+  "description": "Rules for report classification, field extraction, and risk assessment. No API required.",
+
+  "report_type_detection": {
+    "phase_report": {
+      "description": "Numbered-section Claude phase report (## 1. Goal, ## N. Files changed)",
+      "patterns": ["## \\d+\\.", "Files changed", "Build result"],
+      "min_matches": 2
+    },
+    "todo_list": {
+      "description": "Checkbox-style todo report",
+      "patterns": ["\\u2713", "\\u25a1", "\\u2705"],
+      "min_matches": 2
+    },
+    "completed_task_doc": {
+      "description": "A task doc Claude already filled in (has Final report required section)",
+      "patterns": ["Final report required", "Files created:", "Files modified:"],
+      "min_matches": 2
+    },
+    "feature_spec": {
+      "description": "Feature specification document with numbered features",
+      "patterns": ["Feature \\d+", "Important:", "\\*\\*"],
+      "min_matches": 2
+    }
+  },
+
+  "section_patterns": {
+    "project":     "\\*\\*Project:\\*\\*\\s*(.+)",
+    "branch":      "\\*\\*Branch:\\*\\*\\s*`?([^`\\n]+)`?",
+    "base_commit": "\\*\\*Base(?:\\s+commit)?:\\*\\*\\s*`?([^`\\n]+)`?",
+    "status":      "\\*\\*Status:\\*\\*\\s*(.+)"
+  },
+
+  "completion_markers":        ["✅", "✓"],
+  "pending_markers":           ["□", "[ ]"],
+  "stable_keywords":           ["unchanged", "untouched", "not changed", "not touched", "not modified"],
+  "max_completed_items":       20,
+  "max_pending_items":         15,
+  "max_stable_guards":          8,
+  "recommendation_max_chars": 800,
+
+  "risk_classifier": {
+    "description": "Keyword lists that augment the built-in regex patterns in orchestrator.py. Edit these to tune classification without changing Python code.",
+
+    "unsafe_keywords": [
+      "git push --force",
+      "force push",
+      "delete the branch",
+      "drop the stash",
+      "rm -rf",
+      "git clean -f"
+    ],
+
+    "blocked_keywords": [
+      "tests are failing",
+      "tests failed",
+      "build failed",
+      "build is broken",
+      "test suite broken"
+    ],
+
+    "approval_keywords": [
+      "git commit",
+      "git stash pop",
+      "npm install",
+      "yarn add",
+      "pip install",
+      "package.json",
+      "schema change",
+      "reducer change",
+      "migration",
+      "delete files",
+      "remove files",
+      "Bar Pattern logic",
+      "Generation Lens",
+      "should commit",
+      "will commit",
+      "now commit"
+    ],
+
+    "low_risk_keywords": [
+      "documentation only",
+      "readme update",
+      "spec update",
+      "report creation",
+      "smoke test",
+      "browser verification",
+      "non-destructive",
+      "diagnostic script",
+      "parser improvement",
+      "no code changes",
+      "no source changes",
+      "markdown only",
+      "test file creation",
+      "script improvement"
+    ],
+
+    "tradingview_keywords": [
+      "drawing tool",
+      "Bar Pattern",
+      "Standard",
+      "Transform 2x2",
+      "Generation Lens",
+      "TradingView Light",
+      "drawing behavior",
+      "unified sheet",
+      "pane"
+    ],
+
+    "decision_descriptions": {
+      "low_risk_auto_allowed": "Only safe local operations. No source changes, no commits, no dependency installs.",
+      "approval_required":     "Task involves code changes, commits, dependency updates, or schema/storage changes.",
+      "blocked":               "Report or task shows a failure state (tests failing, build broken). Must investigate first.",
+      "unsafe_stop":           "Forbidden action detected (push, tag, merge, force reset, drop stash, rm -rf). Hard stop."
+    }
+  }
+}
