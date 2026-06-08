@@ -161,6 +161,92 @@ class TestRunnerGates(unittest.TestCase):
                 self.assertTrue(ok)
                 self.assertIn("skipped", msg)
 
+    # Gate 4: runtime folder exceptions
+    def test_git_safety_gate_runtime_untracked_inbox_allowed(self):
+        import logging
+        logger = logging.getLogger("test")
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stdout="?? inbox/reports/test.md\n", stderr="")
+                ok, msg = cr._gate_git_safety(Path(tmp), "regular task", logger)
+                self.assertTrue(ok, f"Expected inbox/reports/ untracked to be allowed; got: {msg}")
+
+    def test_git_safety_gate_runtime_untracked_outbox_allowed(self):
+        import logging
+        logger = logging.getLogger("test")
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stdout="?? outbox/tasks/task.md\n", stderr="")
+                ok, msg = cr._gate_git_safety(Path(tmp), "regular task", logger)
+                self.assertTrue(ok, f"Expected outbox/tasks/ untracked to be allowed; got: {msg}")
+
+    def test_git_safety_gate_runtime_untracked_approvals_allowed(self):
+        import logging
+        logger = logging.getLogger("test")
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stdout="?? approvals/PENDING_APPROVAL.md\n", stderr="")
+                ok, msg = cr._gate_git_safety(Path(tmp), "regular task", logger)
+                self.assertTrue(ok, f"Expected approvals/ untracked to be allowed; got: {msg}")
+
+    def test_git_safety_gate_runtime_untracked_logs_allowed(self):
+        import logging
+        logger = logging.getLogger("test")
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stdout="?? logs/bridge.log\n", stderr="")
+                ok, msg = cr._gate_git_safety(Path(tmp), "regular task", logger)
+                self.assertTrue(ok, f"Expected logs/ untracked to be allowed; got: {msg}")
+
+    def test_git_safety_gate_runtime_untracked_state_allowed(self):
+        import logging
+        logger = logging.getLogger("test")
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stdout="?? state/latest-decision.json\n", stderr="")
+                ok, msg = cr._gate_git_safety(Path(tmp), "regular task", logger)
+                self.assertTrue(ok, f"Expected state/ untracked to be allowed; got: {msg}")
+
+    def test_git_safety_gate_untracked_outside_runtime_blocked(self):
+        import logging
+        logger = logging.getLogger("test")
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stdout="?? random.txt\n", stderr="")
+                ok, msg = cr._gate_git_safety(Path(tmp), "regular task", logger)
+                self.assertFalse(ok, "Expected untracked file outside runtime folders to be blocked")
+                self.assertIn("GIT_DIRTY", msg)
+
+    def test_git_safety_gate_modified_tracked_blocked(self):
+        import logging
+        logger = logging.getLogger("test")
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stdout=" M bridge.py\n", stderr="")
+                ok, msg = cr._gate_git_safety(Path(tmp), "regular task", logger)
+                self.assertFalse(ok, "Expected modified tracked file to be blocked")
+                self.assertIn("GIT_DIRTY", msg)
+
+    def test_git_safety_gate_added_file_blocked(self):
+        import logging
+        logger = logging.getLogger("test")
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stdout="A  new_file.py\n", stderr="")
+                ok, msg = cr._gate_git_safety(Path(tmp), "regular task", logger)
+                self.assertFalse(ok, "Expected staged new file to be blocked")
+                self.assertIn("GIT_DIRTY", msg)
+
+    def test_git_safety_gate_deleted_file_blocked(self):
+        import logging
+        logger = logging.getLogger("test")
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stdout="D  bridge.py\n", stderr="")
+                ok, msg = cr._gate_git_safety(Path(tmp), "regular task", logger)
+                self.assertFalse(ok, "Expected staged deletion to be blocked")
+                self.assertIn("GIT_DIRTY", msg)
+
     # Gate 5: RATE_LIMIT_GATE
     def test_rate_limit_gate_no_recent_runs(self):
         ok, msg = cr._gate_rate_limit({}, max_runs=3)

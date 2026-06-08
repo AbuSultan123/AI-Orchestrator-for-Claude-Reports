@@ -45,6 +45,17 @@ _DOCS_ONLY_PATTERNS = (
     "no code changes", "no source changes", "markdown only",
 )
 
+# Untracked files (git status "??") under these folders are safe runtime
+# artifacts and do not count as dirty.  Tracked modifications, additions,
+# deletions, or renames are never exempted.
+_RUNTIME_FOLDER_EXCEPTIONS = (
+    "inbox/reports/",
+    "outbox/tasks/",
+    "approvals/",
+    "logs/",
+    "state/",
+)
+
 _NULL_LOGGER = logging.getLogger("null")
 _NULL_LOGGER.addHandler(logging.NullHandler())
 
@@ -86,7 +97,14 @@ def _gate_git_safety(
     task_text: str,
     logger: logging.Logger,
 ) -> "tuple[bool, str]":
-    """Gate 4: git working tree must be clean (docs-only exception applies)."""
+    """Gate 4: git working tree must be clean.
+
+    Two exceptions that allow an otherwise-dirty tree to pass:
+    1. Docs-only task: any task text containing a docs-only phrase.
+    2. Runtime folders: untracked files (status "??") whose path starts with
+       one of _RUNTIME_FOLDER_EXCEPTIONS are silently ignored.  Tracked
+       modifications, additions, deletions, and renames are never exempted.
+    """
     try:
         result = subprocess.run(
             ["git", "status", "--porcelain"],
@@ -97,15 +115,25 @@ def _gate_git_safety(
         )
         if result.returncode != 0:
             return True, "git not available or not a repo; skipping git check"
-        dirty = result.stdout.strip()
-        if not dirty:
+        if not result.stdout.strip():
             return True, "Working tree is clean"
         # Docs-only exception: documentation tasks are allowed on a dirty tree
         task_lower = task_text.lower()
-        is_docs = any(p in task_lower for p in _DOCS_ONLY_PATTERNS)
-        if is_docs:
-            return True, f"Working tree dirty but task is docs-only (exception applies)"
-        return False, f"GIT_DIRTY: working tree has uncommitted changes"
+        if any(p in task_lower for p in _DOCS_ONLY_PATTERNS):
+            return True, "Working tree dirty but task is docs-only (exception applies)"
+        # Filter out untracked files that live inside approved runtime folders
+        real_dirty = []
+        for line in result.stdout.splitlines():
+            if not line:
+                continue
+            xy   = line[:2]
+            path = line[3:].replace("\\", "/")   # normalize for Windows
+            if xy == "??" and any(path.startswith(f) for f in _RUNTIME_FOLDER_EXCEPTIONS):
+                continue   # safe runtime artifact — not a real dirty change
+            real_dirty.append(line)
+        if not real_dirty:
+            return True, "Working tree has only allowed runtime untracked files"
+        return False, "GIT_DIRTY: working tree has uncommitted changes"
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         logger.debug(f"Git check skipped: {exc}")
         return True, "git check skipped (not available)"
