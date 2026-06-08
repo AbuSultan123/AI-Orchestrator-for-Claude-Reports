@@ -6,6 +6,24 @@ state/latest-decision.json
 state/NEXT_TASK.md
 state/APPROVAL_REQUEST.md
 
+# Bridge v0.3 runtime outputs (generated on each run)
+state/bridge-status.json
+state/bridge.pid
+state/processed-hashes.json
+state/processed/
+logs/bridge.log
+logs/openai-calls.log
+logs/errors.log
+logs/claude-run-*.log
+outbox/tasks/*.md
+approvals/PENDING_APPROVAL.md
+approvals/APPROVED.flag
+approvals/REJECTED.flag
+approvals/archive/
+
+# Secrets -- never commit
+.env
+
 # Python
 __pycache__/
 *.py[cod]
