@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
 """
-AI Orchestrator Bridge v0.3 -- Phase A: File watcher, no API, no execution.
+AI Orchestrator Bridge v0.3 -- Phase B: file watcher + optional OpenAI planner.
 
 Watches inbox/reports/ for new .md or .json reports. For each report:
-  1. Calls orchestrator.py to classify risk and draft NEXT_TASK.md.
-  2. Archives the generated task to outbox/tasks/.
-  3. Writes approvals/PENDING_APPROVAL.md when decision requires it.
-  4. Logs all actions to logs/bridge.log.
+  1. Calls orchestrator.py to classify risk and draft NEXT_TASK.md (local planner).
+  2. [Phase B] Optionally calls OpenAI to improve the task (--planner openai).
+  3. Scans the final task for forbidden patterns regardless of planner.
+  4. Archives the task to outbox/tasks/.
+  5. Writes approvals/PENDING_APPROVAL.md when decision requires it.
+  6. Logs all actions to logs/bridge.log.
 
-No OpenAI API. No Anthropic API. No Claude Code execution.
+No Claude Code execution in Phase B.
 Python 3.8+ standard library only.
 
 Usage:
   python bridge.py --once
+  python bridge.py --once --planner openai
   python bridge.py --watch
-  python bridge.py --watch --interval 10
+  python bridge.py --watch --planner openai --interval 10
 """
 
 import argparse
@@ -22,6 +25,7 @@ import hashlib
 import json
 import logging
 import logging.handlers
+import os
 import subprocess
 import sys
 import time
@@ -31,7 +35,7 @@ from pathlib import Path
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-VERSION   = "0.3-phase-a"
+VERSION   = "0.3-phase-b"
 BASE_DIR  = Path(__file__).parent
 ORCH_PY   = BASE_DIR / "orchestrator.py"
 
@@ -63,6 +67,8 @@ def load_config() -> dict:
         "poll_interval_seconds": 5,
         "log_rotate_max_bytes": 10_485_760,
         "log_rotate_backup_count": 5,
+        "planner": {"default": "local"},
+        "forbidden_task_patterns": [],
     }
     if CONFIG_PATH.exists():
         try:
@@ -125,7 +131,6 @@ def set_status(status: str, detail: str = "") -> None:
 
 
 def write_pid() -> None:
-    import os
     STATE_DIR.mkdir(exist_ok=True)
     PID_FILE.write_text(str(os.getpid()), encoding="utf-8")
 
@@ -156,6 +161,30 @@ def read_decision() -> dict:
         except (json.JSONDecodeError, OSError):
             pass
     return {}
+
+
+# ---------------------------------------------------------------------------
+# Safety: forbidden pattern scan
+# ---------------------------------------------------------------------------
+
+def scan_forbidden_patterns(task_text: str, config: dict) -> "list[str]":
+    """Return all forbidden patterns found in task_text (case-insensitive)."""
+    patterns = config.get("forbidden_task_patterns", [])
+    lower    = task_text.lower()
+    return [p for p in patterns if p.lower() in lower]
+
+
+def _override_decision_unsafe(decision: dict, found: "list[str]") -> dict:
+    """Return a new decision dict upgraded to unsafe_stop."""
+    return {
+        **decision,
+        "decision":              "unsafe_stop",
+        "risk_level":            "high",
+        "reason":                f"Forbidden pattern(s) in generated task: {found[:3]}",
+        "requires_user_approval": True,
+        "can_execute_with_execute_flag": False,
+        "timestamp":             datetime.now().isoformat(),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -273,7 +302,7 @@ def write_pending_approval(
 
     out_path = APPROVAL_DIR / "PENDING_APPROVAL.md"
     out_path.write_text("\n".join(lines), encoding="utf-8")
-    logger.info(f"PENDING_APPROVAL written: approvals/PENDING_APPROVAL.md")
+    logger.info("PENDING_APPROVAL written: approvals/PENDING_APPROVAL.md")
     return out_path
 
 
@@ -281,15 +310,40 @@ def write_pending_approval(
 # Report processing
 # ---------------------------------------------------------------------------
 
-def process_report(report_path: Path, hashes: dict, logger: logging.Logger) -> bool:
+def process_report(
+    report_path: Path,
+    hashes: dict,
+    logger: logging.Logger,
+    planner: str = "local",
+    config: "dict | None" = None,
+) -> bool:
     """
     Process one report file. Returns True if handled (including skipped duplicates).
     Returns False only on hard errors.
-    """
-    ts = _ts()
-    logger.info(f"--- Processing: {report_path.name} ---")
 
-    # Hash-based duplicate check
+    planner="local"  : use the existing local orchestrator template (Phase A behaviour).
+    planner="openai" : use OpenAI to improve the task after local classification.
+    """
+    if config is None:
+        config = {}
+
+    ts = _ts()
+    logger.info(f"--- Processing: {report_path.name} (planner={planner}) ---")
+
+    # --- Phase B gate: check API key before doing ANY work ---
+    if planner == "openai":
+        api_key_present = bool(os.environ.get("OPENAI_API_KEY", "").strip())
+        if not api_key_present:
+            logger.error(
+                "MISSING_API_KEY: OPENAI_API_KEY environment variable is not set. "
+                "Set it with:  $env:OPENAI_API_KEY='<your-key>'  "
+                "Never store the key in config files or commit it. "
+                "Stopping -- no task generated for this report."
+            )
+            set_status("error", "OPENAI_API_KEY not set")
+            return False
+
+    # --- Duplicate check ---
     try:
         h = file_sha256(report_path)
     except OSError as exc:
@@ -300,7 +354,7 @@ def process_report(report_path: Path, hashes: dict, logger: logging.Logger) -> b
         logger.info(f"DUPLICATE_SKIP: {report_path.name} already processed (hash match)")
         return True
 
-    # Minimal content validation
+    # --- Minimal content validation ---
     try:
         content = report_path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
@@ -311,22 +365,95 @@ def process_report(report_path: Path, hashes: dict, logger: logging.Logger) -> b
         logger.warning(f"MALFORMED_REPORT: {report_path.name} is too short, skipping")
         return False
 
-    set_status("processing", f"Processing {report_path.name}")
+    set_status("processing", f"Processing {report_path.name} [{planner}]")
 
-    # Run orchestrator
+    # --- Step 1: local orchestrator (always runs; generates risk context + local draft) ---
     ok = run_orchestrator(report_path, logger)
     if not ok:
         set_status("error", f"Orchestrator failed for {report_path.name}")
         return False
 
-    # Read decision
     decision = read_decision()
-    d = decision.get("decision", "unknown")
+
+    # --- Step 2 (Phase B only): OpenAI improvement ---
+    if planner == "openai":
+        local_draft_path = ORCH_STATE_DIR / "NEXT_TASK.md"
+        local_draft = (
+            local_draft_path.read_text(encoding="utf-8")
+            if local_draft_path.exists() else ""
+        )
+
+        from openai_planner import (
+            improve_task, log_api_call,
+            MissingApiKeyError, ApiCallError,
+        )
+
+        planner_cfg = config.get("planner", {}).get("openai", {})
+        model = planner_cfg.get("model", "gpt-4o")
+
+        try:
+            logger.info(f"OpenAI planner: calling model={model}")
+            improved = improve_task(content, local_draft, decision, config)
+            logger.info("OpenAI planner: task generated successfully")
+
+            # Safety scan on OpenAI output before accepting it
+            found = scan_forbidden_patterns(improved, config)
+            if found:
+                logger.warning(
+                    f"FORBIDDEN_CONTENT in OpenAI output: {found[:5]}. "
+                    "Overriding decision to unsafe_stop. Local draft preserved."
+                )
+                improved = local_draft  # revert to safer local draft
+                decision = _override_decision_unsafe(decision, found)
+                log_api_call(LOGS_DIR, model, 0, "unsafe_stop_forbidden_content", success=False, error_type="FORBIDDEN_CONTENT")
+            else:
+                # Write the improved task over the local draft
+                local_draft_path.write_text(improved, encoding="utf-8")
+                # Update decision timestamp only (risk level unchanged)
+                decision = {**decision, "timestamp": datetime.now().isoformat()}
+                log_api_call(LOGS_DIR, model, 0, decision.get("decision", "unknown"), success=True)
+                logger.info("OpenAI task written to state/NEXT_TASK.md")
+
+        except MissingApiKeyError as exc:
+            # Should not reach here (we checked upfront), but handle defensively
+            logger.error(f"MISSING_API_KEY: {exc}")
+            set_status("error", "OPENAI_API_KEY not set")
+            log_api_call(LOGS_DIR, model, 0, "error", success=False, error_type="MISSING_API_KEY")
+            return False
+
+        except ApiCallError as exc:
+            logger.error(f"OPENAI_API_ERROR: {exc}")
+            set_status("error", f"OpenAI call failed: {exc}")
+            log_api_call(LOGS_DIR, model, 0, "error", success=False, error_type=type(exc).__name__)
+            return False
+
+    else:
+        # Local planner: still scan the local task for forbidden patterns
+        local_task_path = ORCH_STATE_DIR / "NEXT_TASK.md"
+        if local_task_path.exists():
+            local_task_text = local_task_path.read_text(encoding="utf-8")
+            found = scan_forbidden_patterns(local_task_text, config)
+            if found:
+                logger.warning(f"FORBIDDEN_CONTENT in local task output: {found[:5]}")
+                decision = _override_decision_unsafe(decision, found)
+
+    # --- Read final decision ---
+    d    = decision.get("decision", "unknown")
     risk = decision.get("risk_level", "?")
     reason = decision.get("reason", "")[:80]
-    logger.info(f"Decision: {d} | Risk: {risk} | {reason}")
+    logger.info(f"Final decision: {d} | Risk: {risk} | {reason}")
 
-    # Archive task to outbox
+    # --- Update decision.json if it was overridden ---
+    if decision.get("decision") == "unsafe_stop" and d == "unsafe_stop":
+        dec_path = ORCH_STATE_DIR / "latest-decision.json"
+        try:
+            dec_path.write_text(
+                json.dumps(decision, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+        except OSError:
+            pass
+
+    # --- Archive task to outbox ---
     task_dest = archive_task(ts, logger)
     if task_dest:
         try:
@@ -335,21 +462,22 @@ def process_report(report_path: Path, hashes: dict, logger: logging.Logger) -> b
             rel = task_dest
         logger.info(f"Task archived: {rel}")
 
-    # Write approval file if needed
+    # --- Write approval file if needed ---
     if d in _DECISIONS_NEEDING_APPROVAL:
         write_pending_approval(report_path, decision, ts, logger)
     elif d == "low_risk_auto_allowed":
-        logger.info("low_risk_auto_allowed: task is ready (Phase A does not execute)")
+        logger.info(f"low_risk_auto_allowed: task is ready (Phase B does not execute)")
 
-    # Record hash so we do not reprocess
+    # --- Record hash ---
     hashes[h] = {
         "file":         report_path.name,
         "processed_at": datetime.now().isoformat(),
         "decision":     d,
+        "planner":      planner,
     }
     save_hashes(hashes)
 
-    # Move processed report to state/processed/
+    # --- Move report to state/processed/ ---
     processed_dir = STATE_DIR / "processed"
     processed_dir.mkdir(exist_ok=True)
     dest_name = f"{ts}-{report_path.name}"
@@ -359,7 +487,7 @@ def process_report(report_path: Path, hashes: dict, logger: logging.Logger) -> b
     except OSError as exc:
         logger.warning(f"Could not move report to state/processed/: {exc}")
 
-    set_status("idle", f"Last: {report_path.name} -> {d}")
+    set_status("idle", f"Last: {report_path.name} -> {d} [{planner}]")
     logger.info(f"--- Done: {report_path.name} ---")
     return True
 
@@ -380,8 +508,10 @@ def scan_inbox(logger: logging.Logger) -> "list[Path]":
 # Run modes
 # ---------------------------------------------------------------------------
 
-def run_once(logger: logging.Logger) -> int:
+def run_once(logger: logging.Logger, planner: str = "local", config: "dict | None" = None) -> int:
     """Process all pending inbox reports and exit. Returns count processed."""
+    if config is None:
+        config = {}
     hashes = load_hashes()
     files  = scan_inbox(logger)
 
@@ -389,31 +519,38 @@ def run_once(logger: logging.Logger) -> int:
         logger.info("Inbox is empty. Nothing to process.")
         return 0
 
-    logger.info(f"Found {len(files)} report(s) in inbox.")
+    logger.info(f"Found {len(files)} report(s) in inbox. Planner: {planner}")
     count = 0
     for f in files:
-        if process_report(f, hashes, logger):
+        if process_report(f, hashes, logger, planner=planner, config=config):
             count += 1
 
     logger.info(f"Run complete. Processed {count}/{len(files)} report(s).")
     return count
 
 
-def run_watch(interval: int, logger: logging.Logger) -> None:
+def run_watch(
+    interval: int,
+    logger: logging.Logger,
+    planner: str = "local",
+    config: "dict | None" = None,
+) -> None:
     """Poll inbox in a loop. Ctrl+C to stop."""
+    if config is None:
+        config = {}
     write_pid()
-    set_status("idle", "Bridge started -- watch mode")
+    set_status("idle", f"Bridge started -- watch mode [{planner}]")
     logger.info(f"=== Bridge v{VERSION} started in watch mode ===")
     logger.info(f"Watching: {INBOX_DIR}")
+    logger.info(f"Planner:  {planner}")
     logger.info(f"Interval: {interval}s  |  Press Ctrl+C to stop")
-    logger.info("No API calls. No Claude Code execution.")
 
     hashes = load_hashes()
     try:
         while True:
             files = scan_inbox(logger)
             for f in files:
-                process_report(f, hashes, logger)
+                process_report(f, hashes, logger, planner=planner, config=config)
             time.sleep(interval)
     except KeyboardInterrupt:
         logger.info("Bridge stopped by user (Ctrl+C)")
@@ -433,16 +570,20 @@ def run_watch(interval: int, logger: logging.Logger) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="bridge",
-        description=f"AI Orchestrator Bridge v{VERSION} -- Phase A, no API.",
+        description=f"AI Orchestrator Bridge v{VERSION}",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-No OpenAI API. No Anthropic API. No Claude Code execution.
-Drop .md or .json reports into inbox/reports/ to process them.
+Planner modes:
+  --planner local   (default) Use offline local template. No API key needed.
+  --planner openai  Use OpenAI to improve the task. Requires OPENAI_API_KEY env var.
+
+No Claude Code execution in Phase B.
 
 Examples:
   python bridge.py --once
-  python bridge.py --watch
-  python bridge.py --watch --interval 10
+  python bridge.py --once --planner local
+  python bridge.py --once --planner openai
+  python bridge.py --watch --planner openai --interval 10
         """,
     )
     group = parser.add_mutually_exclusive_group(required=True)
@@ -450,27 +591,37 @@ Examples:
                        help="Process all pending inbox reports once, then exit")
     group.add_argument("--watch", action="store_true",
                        help="Poll inbox/reports/ continuously for new reports")
+    parser.add_argument(
+        "--planner",
+        choices=["local", "openai"],
+        default=None,
+        help="Task planner to use (default: from config or 'local')",
+    )
     parser.add_argument("--interval", type=int, default=None,
                         help="Polling interval in seconds for --watch (default: from config or 5)")
     args = parser.parse_args()
 
-    config = load_config()
-    logger = setup_logging(LOGS_DIR, config)
+    config  = load_config()
+    logger  = setup_logging(LOGS_DIR, config)
+
+    # Resolve planner: CLI flag > config default > "local"
+    planner = args.planner or config.get("planner", {}).get("default", "local")
 
     logger.info(f"Bridge Mode v{VERSION}")
     logger.info(f"Base:     {BASE_DIR}")
     logger.info(f"Inbox:    {INBOX_DIR}")
     logger.info(f"Outbox:   {OUTBOX_DIR}")
+    logger.info(f"Planner:  {planner}")
 
     # Ensure all required folders exist
     for folder in (INBOX_DIR, OUTBOX_DIR, APPROVAL_DIR, LOGS_DIR, STATE_DIR):
         folder.mkdir(parents=True, exist_ok=True)
 
     if args.once:
-        run_once(logger)
+        run_once(logger, planner=planner, config=config)
     else:
         interval = args.interval or config.get("poll_interval_seconds", 5)
-        run_watch(interval, logger)
+        run_watch(interval, logger, planner=planner, config=config)
 
 
 if __name__ == "__main__":
