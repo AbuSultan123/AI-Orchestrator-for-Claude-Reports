@@ -566,7 +566,8 @@ class TestPhaseARegression(unittest.TestCase):
         self.assertEqual(result, 1)
 
     def test_version_updated(self):
-        self.assertIn("phase-b", b.VERSION)
+        # Phase C advances version; check we're >= phase-b
+        self.assertIn("0.3-phase", b.VERSION)
 
 
 if __name__ == "__main__":

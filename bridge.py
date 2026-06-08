@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AI Orchestrator Bridge v0.3 -- Phase B: file watcher + optional OpenAI planner.
+AI Orchestrator Bridge v0.3 -- Phase C: dry-run runner + pre-execution checklist.
 
 Watches inbox/reports/ for new .md or .json reports. For each report:
   1. Calls orchestrator.py to classify risk and draft NEXT_TASK.md (local planner).
@@ -8,14 +8,16 @@ Watches inbox/reports/ for new .md or .json reports. For each report:
   3. Scans the final task for forbidden patterns regardless of planner.
   4. Archives the task to outbox/tasks/.
   5. Writes approvals/PENDING_APPROVAL.md when decision requires it.
-  6. Logs all actions to logs/bridge.log.
+  6. [Phase C] Runs pre-execution checklist via claude_runner (dry-run by default).
+  7. Logs all actions to logs/bridge.log.
 
-No Claude Code execution in Phase B.
+No automatic Claude Code execution in Phase C (--runner dry-run is the default).
 Python 3.8+ standard library only.
 
 Usage:
   python bridge.py --once
   python bridge.py --once --planner openai
+  python bridge.py --once --runner dry-run
   python bridge.py --watch
   python bridge.py --watch --planner openai --interval 10
 """
@@ -35,7 +37,7 @@ from pathlib import Path
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-VERSION   = "0.3-phase-b"
+VERSION   = "0.3-phase-c"
 BASE_DIR  = Path(__file__).parent
 ORCH_PY   = BASE_DIR / "orchestrator.py"
 
@@ -69,6 +71,8 @@ def load_config() -> dict:
         "log_rotate_backup_count": 5,
         "planner": {"default": "local"},
         "forbidden_task_patterns": [],
+        "max_auto_runs_per_hour": 3,
+        "claude_timeout_seconds": 300,
     }
     if CONFIG_PATH.exists():
         try:
@@ -316,6 +320,7 @@ def process_report(
     logger: logging.Logger,
     planner: str = "local",
     config: "dict | None" = None,
+    runner: str = "dry-run",
 ) -> bool:
     """
     Process one report file. Returns True if handled (including skipped duplicates).
@@ -323,6 +328,8 @@ def process_report(
 
     planner="local"  : use the existing local orchestrator template (Phase A behaviour).
     planner="openai" : use OpenAI to improve the task after local classification.
+    runner="dry-run" : run pre-execution checklist but do NOT invoke Claude (Phase C).
+    runner="execute" : run pre-execution checklist AND invoke Claude if gates pass (Phase D).
     """
     if config is None:
         config = {}
@@ -466,7 +473,30 @@ def process_report(
     if d in _DECISIONS_NEEDING_APPROVAL:
         write_pending_approval(report_path, decision, ts, logger)
     elif d == "low_risk_auto_allowed":
-        logger.info(f"low_risk_auto_allowed: task is ready (Phase B does not execute)")
+        logger.info(f"low_risk_auto_allowed: running pre-execution checklist (runner={runner})")
+        from claude_runner import check_and_run
+        runner_result = check_and_run(
+            decision=decision,
+            task_path=ORCH_STATE_DIR / "NEXT_TASK.md",
+            config=config,
+            mode=runner,
+            base_dir=BASE_DIR,
+            approval_dir=APPROVAL_DIR,
+            hashes=hashes,
+            report_hash=h,
+            logger=logger,
+        )
+        passed  = runner_result["checks_passed"]
+        failed  = runner_result["checks_failed"]
+        would   = runner_result["would_run"]
+        ran     = runner_result["ran"]
+        gate    = runner_result["gate_triggered"]
+        logger.info(
+            f"Runner result: would_run={would} ran={ran} "
+            f"gates_passed={len(passed)} gate_triggered={gate}"
+        )
+        if runner_result["loop_detected"]:
+            logger.warning("Runner: loop detection fired -- same report hash seen recently")
 
     # --- Record hash ---
     hashes[h] = {
@@ -508,7 +538,12 @@ def scan_inbox(logger: logging.Logger) -> "list[Path]":
 # Run modes
 # ---------------------------------------------------------------------------
 
-def run_once(logger: logging.Logger, planner: str = "local", config: "dict | None" = None) -> int:
+def run_once(
+    logger: logging.Logger,
+    planner: str = "local",
+    config: "dict | None" = None,
+    runner: str = "dry-run",
+) -> int:
     """Process all pending inbox reports and exit. Returns count processed."""
     if config is None:
         config = {}
@@ -519,10 +554,10 @@ def run_once(logger: logging.Logger, planner: str = "local", config: "dict | Non
         logger.info("Inbox is empty. Nothing to process.")
         return 0
 
-    logger.info(f"Found {len(files)} report(s) in inbox. Planner: {planner}")
+    logger.info(f"Found {len(files)} report(s) in inbox. Planner: {planner} | Runner: {runner}")
     count = 0
     for f in files:
-        if process_report(f, hashes, logger, planner=planner, config=config):
+        if process_report(f, hashes, logger, planner=planner, config=config, runner=runner):
             count += 1
 
     logger.info(f"Run complete. Processed {count}/{len(files)} report(s).")
@@ -534,15 +569,17 @@ def run_watch(
     logger: logging.Logger,
     planner: str = "local",
     config: "dict | None" = None,
+    runner: str = "dry-run",
 ) -> None:
     """Poll inbox in a loop. Ctrl+C to stop."""
     if config is None:
         config = {}
     write_pid()
-    set_status("idle", f"Bridge started -- watch mode [{planner}]")
+    set_status("idle", f"Bridge started -- watch mode [{planner}/{runner}]")
     logger.info(f"=== Bridge v{VERSION} started in watch mode ===")
     logger.info(f"Watching: {INBOX_DIR}")
     logger.info(f"Planner:  {planner}")
+    logger.info(f"Runner:   {runner}")
     logger.info(f"Interval: {interval}s  |  Press Ctrl+C to stop")
 
     hashes = load_hashes()
@@ -550,7 +587,7 @@ def run_watch(
         while True:
             files = scan_inbox(logger)
             for f in files:
-                process_report(f, hashes, logger, planner=planner, config=config)
+                process_report(f, hashes, logger, planner=planner, config=config, runner=runner)
             time.sleep(interval)
     except KeyboardInterrupt:
         logger.info("Bridge stopped by user (Ctrl+C)")
@@ -577,12 +614,15 @@ Planner modes:
   --planner local   (default) Use offline local template. No API key needed.
   --planner openai  Use OpenAI to improve the task. Requires OPENAI_API_KEY env var.
 
-No Claude Code execution in Phase B.
+Runner modes (Phase C):
+  --runner dry-run  (default) Run all pre-execution gates but do NOT invoke Claude.
+  --runner execute  Run gates AND invoke Claude if all gates pass (Phase D).
 
 Examples:
   python bridge.py --once
   python bridge.py --once --planner local
   python bridge.py --once --planner openai
+  python bridge.py --once --runner dry-run
   python bridge.py --watch --planner openai --interval 10
         """,
     )
@@ -597,6 +637,12 @@ Examples:
         default=None,
         help="Task planner to use (default: from config or 'local')",
     )
+    parser.add_argument(
+        "--runner",
+        choices=["dry-run", "execute"],
+        default="dry-run",
+        help="Runner mode: dry-run (Phase C, default) or execute (Phase D)",
+    )
     parser.add_argument("--interval", type=int, default=None,
                         help="Polling interval in seconds for --watch (default: from config or 5)")
     args = parser.parse_args()
@@ -606,22 +652,24 @@ Examples:
 
     # Resolve planner: CLI flag > config default > "local"
     planner = args.planner or config.get("planner", {}).get("default", "local")
+    runner  = args.runner  # always explicit; default is "dry-run" (set above)
 
     logger.info(f"Bridge Mode v{VERSION}")
     logger.info(f"Base:     {BASE_DIR}")
     logger.info(f"Inbox:    {INBOX_DIR}")
     logger.info(f"Outbox:   {OUTBOX_DIR}")
     logger.info(f"Planner:  {planner}")
+    logger.info(f"Runner:   {runner}")
 
     # Ensure all required folders exist
     for folder in (INBOX_DIR, OUTBOX_DIR, APPROVAL_DIR, LOGS_DIR, STATE_DIR):
         folder.mkdir(parents=True, exist_ok=True)
 
     if args.once:
-        run_once(logger, planner=planner, config=config)
+        run_once(logger, planner=planner, config=config, runner=runner)
     else:
         interval = args.interval or config.get("poll_interval_seconds", 5)
-        run_watch(interval, logger, planner=planner, config=config)
+        run_watch(interval, logger, planner=planner, config=config, runner=runner)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 {
-  "version": "0.3-phase-b",
+  "version": "0.3-phase-c",
   "description": "Bridge Mode configuration. API key is NEVER stored here -- use OPENAI_API_KEY env var.",
   "mode": "manual",
   "inbox_dir": "inbox/reports",
