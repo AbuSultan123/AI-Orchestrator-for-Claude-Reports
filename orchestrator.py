@@ -334,7 +334,7 @@ _BLOCKED = [
     (r"test\s+suite\s+(?:broken|crash)",                   "test suite broken"),
     (r"build\s+(?:is\s+)?fail(?:ing|ed)\b",                "build failing"),
     (r"build\s+result[^\n]*fail",                          "build result failure"),
-    (r"\d+\s+errors?\b.*(?:build|vite|rollup|webpack)",    "build errors"),
+    (r"[1-9]\d*\s+errors?\b.*(?:build|vite|rollup|webpack)", "build errors"),
     (r"❌.*(?:fail|error|broken|crash)",                   "failure marker in report"),
 ]
 
