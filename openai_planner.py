@@ -40,6 +40,9 @@ class MissingApiKeyError(PlannerError):
 class ApiCallError(PlannerError):
     """HTTP, network, or response-parse error from OpenAI."""
 
+class RateLimitError(ApiCallError):
+    """OpenAI returned 429 Rate Limit Exceeded. Do not retry automatically."""
+
 
 # ---------------------------------------------------------------------------
 # Prompts
@@ -154,7 +157,10 @@ def call_openai(
         if status == 401:
             raise ApiCallError("OpenAI 401 Unauthorized: check OPENAI_API_KEY") from exc
         if status == 429:
-            raise ApiCallError("OpenAI 429 Rate limit exceeded; retry later") from exc
+            raise RateLimitError(
+                "OPENAI_RATE_LIMITED: OpenAI 429 Rate limit exceeded. "
+                "Stopping safely. Do not retry automatically -- wait before next run."
+            ) from exc
         raise ApiCallError(f"OpenAI HTTP {status}: {err_msg}") from exc
     except urllib.error.URLError as exc:
         raise ApiCallError(f"OpenAI network error: {exc.reason}") from exc
@@ -221,9 +227,17 @@ def improve_task(
             "Set it in your shell:  $env:OPENAI_API_KEY='<your-key>'  "
             "Never put the key in config files."
         )
+    try:
+        api_key.encode("ascii")
+    except UnicodeEncodeError:
+        raise MissingApiKeyError(
+            "OPENAI_API_KEY contains non-ASCII characters and cannot be used "
+            "as an HTTP header value. Re-copy the key from platform.openai.com "
+            "and avoid smart quotes or unicode dashes."
+        )
 
     planner_cfg = config.get("planner", {}).get("openai", {})
-    model      = planner_cfg.get("model",             "gpt-4o")
+    model      = planner_cfg.get("model",             "gpt-4o-mini")
     max_tokens = planner_cfg.get("max_output_tokens", 2048)
     timeout    = planner_cfg.get("timeout_seconds",   60)
 

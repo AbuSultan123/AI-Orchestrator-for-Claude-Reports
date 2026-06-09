@@ -392,7 +392,7 @@ def process_report(
 
         from openai_planner import (
             improve_task, log_api_call,
-            MissingApiKeyError, ApiCallError,
+            MissingApiKeyError, ApiCallError, RateLimitError,
         )
 
         planner_cfg = config.get("planner", {}).get("openai", {})
@@ -426,6 +426,13 @@ def process_report(
             logger.error(f"MISSING_API_KEY: {exc}")
             set_status("error", "OPENAI_API_KEY not set")
             log_api_call(LOGS_DIR, model, 0, "error", success=False, error_type="MISSING_API_KEY")
+            return False
+
+        except RateLimitError as exc:
+            logger.error(f"OPENAI_RATE_LIMITED: {exc}")
+            logger.error("Stopping safely. Do not re-run automatically. Wait before retrying.")
+            set_status("error", "OpenAI rate limited -- manual retry required")
+            log_api_call(LOGS_DIR, model, 0, "error", success=False, error_type="RateLimitError")
             return False
 
         except ApiCallError as exc:
@@ -543,8 +550,13 @@ def run_once(
     planner: str = "local",
     config: "dict | None" = None,
     runner: str = "dry-run",
+    max_reports: "int | None" = None,
 ) -> int:
-    """Process all pending inbox reports and exit. Returns count processed."""
+    """Process pending inbox reports and exit. Returns count processed.
+
+    max_reports=1 processes only the oldest unprocessed report (smoke-test mode).
+    max_reports=None processes all pending reports.
+    """
     if config is None:
         config = {}
     hashes = load_hashes()
@@ -554,7 +566,14 @@ def run_once(
         logger.info("Inbox is empty. Nothing to process.")
         return 0
 
-    logger.info(f"Found {len(files)} report(s) in inbox. Planner: {planner} | Runner: {runner}")
+    if max_reports is not None:
+        files = files[:max_reports]
+        logger.info(
+            f"--first: limiting to {max_reports} report(s). "
+            f"Inbox has {len(scan_inbox(logger))} total."
+        )
+
+    logger.info(f"Found {len(files)} report(s) to process. Planner: {planner} | Runner: {runner}")
     count = 0
     for f in files:
         if process_report(f, hashes, logger, planner=planner, config=config, runner=runner):
@@ -622,6 +641,7 @@ Examples:
   python bridge.py --once
   python bridge.py --once --planner local
   python bridge.py --once --planner openai
+  python bridge.py --once --first --planner openai     # smoke test: one report only
   python bridge.py --once --runner dry-run
   python bridge.py --watch --planner openai --interval 10
         """,
@@ -645,6 +665,11 @@ Examples:
     )
     parser.add_argument("--interval", type=int, default=None,
                         help="Polling interval in seconds for --watch (default: from config or 5)")
+    parser.add_argument(
+        "--first",
+        action="store_true",
+        help="Process only the oldest one report in the inbox (smoke-test mode)",
+    )
     args = parser.parse_args()
 
     config  = load_config()
@@ -666,7 +691,8 @@ Examples:
         folder.mkdir(parents=True, exist_ok=True)
 
     if args.once:
-        run_once(logger, planner=planner, config=config, runner=runner)
+        max_reports = 1 if args.first else None
+        run_once(logger, planner=planner, config=config, runner=runner, max_reports=max_reports)
     else:
         interval = args.interval or config.get("poll_interval_seconds", 5)
         run_watch(interval, logger, planner=planner, config=config, runner=runner)

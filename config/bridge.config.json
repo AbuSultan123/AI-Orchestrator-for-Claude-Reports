@@ -16,9 +16,9 @@
   "planner": {
     "default": "local",
     "openai": {
-      "model": "gpt-5.5",
+      "model": "gpt-4o-mini",
       "timeout_seconds": 60,
-      "max_output_tokens": 6000
+      "max_output_tokens": 2048
     }
   },
   "forbidden_task_patterns": [
