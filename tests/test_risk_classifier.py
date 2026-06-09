@@ -39,8 +39,35 @@ def test_twelve_errors_blocked():
     print(f"  PASS  12 errors -> {d!r} (blocked)")
 
 
+def test_negated_schema_change_not_unsafe():
+    """'No schema changes' must NOT classify as unsafe_stop.
+    It may reach approval_required (the classifier has no negation awareness),
+    but it must never hard-stop as unsafe."""
+    line = (
+        "This is a targeted single-file fix. "
+        "No schema changes, no dependency changes, no destructive operations."
+    )
+    d = _decision(line)
+    assert d != "unsafe_stop", f"False positive: negated schema change classified as {d!r}"
+    print(f"  PASS  No schema changes -> {d!r} (not unsafe_stop)")
+
+
+def test_schema_change_approval_required():
+    """'schema change' in an actionable context must produce approval_required."""
+    line = "Implement schema change to add user_preferences column to the sessions table."
+    d = _decision(line)
+    assert d == "approval_required", f"Expected approval_required, got {d!r}"
+    print(f"  PASS  schema change -> {d!r} (approval_required)")
+
+
 if __name__ == "__main__":
-    cases = [test_zero_errors_not_blocked, test_one_error_blocked, test_twelve_errors_blocked]
+    cases = [
+        test_zero_errors_not_blocked,
+        test_one_error_blocked,
+        test_twelve_errors_blocked,
+        test_negated_schema_change_not_unsafe,
+        test_schema_change_approval_required,
+    ]
     failures = []
     print("Risk classifier smoke tests")
     print("=" * 40)

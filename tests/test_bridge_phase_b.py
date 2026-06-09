@@ -273,6 +273,7 @@ class TestForbiddenPatternScan(unittest.TestCase):
         ]
     }
 
+
     def test_clean_task_returns_empty(self):
         clean = "# Task\nUpdate README.md. No source changes."
         self.assertEqual(b.scan_forbidden_patterns(clean, self._CONFIG), [])
@@ -291,6 +292,88 @@ class TestForbiddenPatternScan(unittest.TestCase):
         dirty = "Run GIT PUSH origin main."
         found = b.scan_forbidden_patterns(dirty, self._CONFIG)
         self.assertIn("git push", found)
+
+
+# ---------------------------------------------------------------------------
+# Tests: schema-change false positive fix (bridge.config.json update)
+# ---------------------------------------------------------------------------
+
+class TestForbiddenPatternScanSchemaFix(unittest.TestCase):
+    """Verify the schema change false positive is fixed.
+
+    'No schema changes' was triggering unsafe_stop because 'schema change' was
+    a plain substring in forbidden_task_patterns.  After the fix the pattern is
+    removed and replaced with tighter SQL-destructive phrases.
+    """
+
+    # Mirrors bridge.config.json forbidden_task_patterns after the fix.
+    _CONFIG = {
+        "forbidden_task_patterns": [
+            "git push", "git tag", "gh release", "gh pr create",
+            "git reset --hard", "git clean", "git stash pop",
+            "npm install", "yarn add", "pip install", "rm -rf",
+            "--execute", "migration", "force-push",
+            "drop table", "alter table", "delete table", "reset database",
+        ]
+    }
+
+    def test_negated_schema_change_not_forbidden(self):
+        """'No schema changes' must NOT appear in forbidden scan results."""
+        text = (
+            "This is a targeted single-file fix. "
+            "No schema changes, no dependency changes, no destructive operations."
+        )
+        found = b.scan_forbidden_patterns(text, self._CONFIG)
+        self.assertEqual(found, [], f"Expected no forbidden patterns, got: {found}")
+
+    def test_schema_change_not_in_updated_forbidden_list(self):
+        """'schema change' must not be present in the updated pattern list."""
+        patterns = self._CONFIG["forbidden_task_patterns"]
+        self.assertNotIn("schema change", patterns)
+
+    def test_apply_migration_still_forbidden(self):
+        """'apply migration' must still be caught via the 'migration' pattern."""
+        text = "Step 1: apply migration 0042 to update the user table."
+        found = b.scan_forbidden_patterns(text, self._CONFIG)
+        self.assertIn("migration", found)
+
+    def test_run_migration_still_forbidden(self):
+        """'run migration' must still be caught via the 'migration' pattern."""
+        text = "run migration scripts before deploying the new release."
+        found = b.scan_forbidden_patterns(text, self._CONFIG)
+        self.assertIn("migration", found)
+
+    def test_drop_table_still_forbidden(self):
+        """'drop table' must be caught by the updated forbidden patterns."""
+        text = "Run: drop table users; to remove legacy data."
+        found = b.scan_forbidden_patterns(text, self._CONFIG)
+        self.assertIn("drop table", found)
+
+    def test_alter_table_still_forbidden(self):
+        """'alter table' must be caught by the updated forbidden patterns."""
+        text = "alter table sessions add column token varchar(255);"
+        found = b.scan_forbidden_patterns(text, self._CONFIG)
+        self.assertIn("alter table", found)
+
+    def test_reset_database_still_forbidden(self):
+        """'reset database' must be caught by the updated forbidden patterns."""
+        text = "reset database to factory defaults before running tests."
+        found = b.scan_forbidden_patterns(text, self._CONFIG)
+        self.assertIn("reset database", found)
+
+    def test_clean_task_with_no_schema_wording_passes(self):
+        """A real-world task like the smoke test output must pass the forbidden gate."""
+        text = (
+            "Proceed to Generation Lens vertical anchor refinement.\n\n"
+            "1. In src/drawings/bar-pattern/barPatternGenLens.js, adjust the yAnchor\n"
+            "   calculation to use Math.round() instead of the raw float.\n"
+            "2. Re-verify visually at 1-minute and 1-hour timeframes in Standard mode.\n"
+            "3. Confirm Transform 2x2 render is pixel-accurate across all four panes.\n\n"
+            "This is a targeted single-file fix. No schema changes, no dependency changes,\n"
+            "no destructive operations."
+        )
+        found = b.scan_forbidden_patterns(text, self._CONFIG)
+        self.assertEqual(found, [], f"Smoke-test task should pass forbidden gate, got: {found}")
 
 
 # ---------------------------------------------------------------------------

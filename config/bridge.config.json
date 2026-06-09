@@ -34,8 +34,11 @@
     "pip install",
     "rm -rf",
     "--execute",
-    "schema change",
     "migration",
-    "force-push"
+    "force-push",
+    "drop table",
+    "alter table",
+    "delete table",
+    "reset database"
   ]
 }
