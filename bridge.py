@@ -702,6 +702,8 @@ Examples:
     )
     parser.add_argument("--interval", type=int, default=None,
                         help="Polling interval in seconds for --watch (default: from config or 5)")
+    parser.add_argument("--max-cycles", type=int, default=None, dest="max_cycles",
+                        help="Exit after N watch cycles (smoke-test/CI mode)")
     parser.add_argument(
         "--first",
         action="store_true",
@@ -732,7 +734,8 @@ Examples:
         run_once(logger, planner=planner, config=config, runner=runner, max_reports=max_reports)
     else:
         interval = args.interval or config.get("poll_interval_seconds", 5)
-        run_watch(interval, logger, planner=planner, config=config, runner=runner)
+        run_watch(interval, logger, planner=planner, config=config, runner=runner,
+                  max_cycles=args.max_cycles)
 
 
 if __name__ == "__main__":
