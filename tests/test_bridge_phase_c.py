@@ -451,6 +451,7 @@ class TestCheckAndRunExecute(unittest.TestCase):
             approval_dir=self.approval_dir,
             hashes=hashes or {},
             report_hash=report_hash,
+            env={"BRIDGE_EXECUTE_ENABLED": "1"},
         )
 
     def test_execute_mode_claude_not_found(self):
