@@ -21,6 +21,12 @@ approvals/APPROVED.flag
 approvals/REJECTED.flag
 approvals/archive/
 
+# Auto-exchange X1/X2 runtime files (generated on each run; .gitkeep is tracked)
+outbox/chatgpt-briefs/*.md
+outbox/chatgpt-briefs/archive/*.md
+inbox/chatgpt-commands/*.md
+state/chatgpt-command-history/*.md
+
 # Secrets -- never commit
 .env
 
