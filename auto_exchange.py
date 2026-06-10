@@ -443,6 +443,100 @@ def review_brief(
 
 
 # ---------------------------------------------------------------------------
+# X5: Dashboard
+# ---------------------------------------------------------------------------
+
+def _file_mtime(path: Path) -> str:
+    """Return ISO mtime string for path, or '' if unavailable."""
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%dT%H:%M:%S")
+    except OSError:
+        return ""
+
+
+def _latest_archive(history_dir: Path) -> str:
+    """Return path of the most-recently-modified *-command.md archive, or ''."""
+    try:
+        candidates = list(history_dir.glob("*-command.md"))
+        if not candidates:
+            return ""
+        return str(max(candidates, key=lambda p: p.stat().st_mtime))
+    except OSError:
+        return ""
+
+
+def write_dashboard(
+    state_dir: "str | Path",
+    brief_path: "str | Path",
+    command_path: "str | Path",
+    history_dir: "str | Path",
+    approvals_dir: "str | Path",
+    planner: str,
+    last_result: str,
+    last_error: str = "",
+    watcher_state: str = "done",
+    cycles: int = 0,
+    commands_generated: int = 0,
+    duplicate_skips: int = 0,
+    approval_pauses: int = 0,
+) -> None:
+    """
+    Write state/auto-exchange-dashboard.json with full pipeline status.
+
+    Fields include file paths/mtimes, last result, safety invariants.
+    Failure is non-fatal — dashboard is best-effort.
+
+    Safety fields are always hardcoded:
+        generated_command_executed = false
+        real_claude_execution      = false
+        x6_enabled                 = false
+    """
+    try:
+        state_dir     = Path(state_dir)
+        brief_path    = Path(brief_path)
+        command_path  = Path(command_path)
+        history_dir   = Path(history_dir)
+        approvals_dir = Path(approvals_dir)
+        pending_path  = approvals_dir / "PENDING_APPROVAL.md"
+
+        state_dir.mkdir(parents=True, exist_ok=True)
+        dashboard_path = state_dir / "auto-exchange-dashboard.json"
+
+        brief_hash = _sha256_file(brief_path) if brief_path.exists() else ""
+
+        data = {
+            "generated_at":   datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+            "watcher_state":  watcher_state,
+            "planner":        planner,
+            "brief": {
+                "path":          str(brief_path),
+                "hash":          brief_hash[:16] + "…" if brief_hash else "",
+                "modified_time": _file_mtime(brief_path),
+            },
+            "command": {
+                "path":                str(command_path),
+                "modified_time":       _file_mtime(command_path),
+                "latest_archive_path": _latest_archive(history_dir),
+            },
+            "last_result":        last_result,
+            "last_error":         last_error,
+            "pending_approval":   pending_path.exists(),
+            "duplicate_skips":    duplicate_skips,
+            "commands_generated": commands_generated,
+            "cycles_completed":   cycles,
+            "approval_pauses":    approval_pauses,
+            "safety": {
+                "generated_command_executed": False,
+                "real_claude_execution":      False,
+                "x6_enabled":                 False,
+            },
+        }
+        dashboard_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # X4: Watch loop
 # ---------------------------------------------------------------------------
 
@@ -546,6 +640,25 @@ def watch_briefs(
     last_brief_hash    = ""
     last_command_path  = ""
     was_paused         = False
+    last_result_str    = "missing_brief"
+    last_error_str     = ""
+
+    def _dash(wstate: str) -> None:
+        write_dashboard(
+            state_dir=state_dir,
+            brief_path=brief_path,
+            command_path=command_path,
+            history_dir=history_dir,
+            approvals_dir=approvals_dir,
+            planner=planner,
+            last_result=last_result_str,
+            last_error=last_error_str,
+            watcher_state=wstate,
+            cycles=counts["cycles"],
+            commands_generated=counts["commands_generated"],
+            duplicate_skips=counts["duplicate_skips"],
+            approval_pauses=counts["approval_pauses"],
+        )
 
     _print_fn()
     _print_fn("=== auto_exchange.py X4 watch ===")
@@ -566,12 +679,14 @@ def watch_briefs(
             if not was_paused:
                 _print_fn(f"[cycle {counts['cycles']}] PAUSED — PENDING_APPROVAL.md exists. Waiting.")
                 was_paused = True
+            last_result_str = "pending_approval"
             _write_status(
                 status_path, "paused_approval", planner, interval,
                 counts["cycles"], counts["commands_generated"],
                 counts["duplicate_skips"], counts["approval_pauses"],
                 last_brief_hash, last_command_path,
             )
+            _dash("paused_approval")
             if interval > 0:
                 _sleep_fn(interval)
             continue
@@ -583,12 +698,14 @@ def watch_briefs(
         # --- Check brief exists ---
         if not brief_path.exists():
             _print_fn(f"[cycle {counts['cycles']}] WAITING — brief not found: {brief_path}")
+            last_result_str = "missing_brief"
             _write_status(
                 status_path, "waiting_for_brief", planner, interval,
                 counts["cycles"], counts["commands_generated"],
                 counts["duplicate_skips"], counts["approval_pauses"],
                 last_brief_hash, last_command_path,
             )
+            _dash("waiting_for_brief")
             if interval > 0:
                 _sleep_fn(interval)
             continue
@@ -598,12 +715,14 @@ def watch_briefs(
         if current_hash and current_hash == last_brief_hash:
             counts["duplicate_skips"] += 1
             _print_fn(f"[cycle {counts['cycles']}] DUPLICATE_SKIP — brief unchanged.")
+            last_result_str = "duplicate_skip"
             _write_status(
                 status_path, "running", planner, interval,
                 counts["cycles"], counts["commands_generated"],
                 counts["duplicate_skips"], counts["approval_pauses"],
                 last_brief_hash, last_command_path,
             )
+            _dash("running")
             if interval > 0:
                 _sleep_fn(interval)
             continue
@@ -624,14 +743,21 @@ def watch_briefs(
         if result["blocked"]:
             _print_fn(f"[cycle {counts['cycles']}] BLOCKED: {result['block_reason']}")
             _print_fn(f"[cycle {counts['cycles']}] PENDING_APPROVAL.md written.")
+            last_result_str = "blocked"
+            last_error_str  = result["block_reason"]
         elif result["ok"]:
             counts["commands_generated"] += 1
             last_command_path = result["command_path"]
             _print_fn(f"[cycle {counts['cycles']}] COMMAND_WRITTEN: {result['command_path']}")
             if result["tokens_used"]:
                 _print_fn(f"[cycle {counts['cycles']}] Tokens used: {result['tokens_used']}")
+            last_result_str = "ready"
+            last_error_str  = ""
         else:
             _print_fn(f"[cycle {counts['cycles']}] ERROR: {result['error']}")
+            err = result["error"]
+            last_result_str = "missing_key" if "OPENAI_API_KEY" in err else "error"
+            last_error_str  = err
 
         _write_status(
             status_path, "running", planner, interval,
@@ -639,6 +765,7 @@ def watch_briefs(
             counts["duplicate_skips"], counts["approval_pauses"],
             last_brief_hash, last_command_path,
         )
+        _dash("running")
 
         if interval > 0:
             _sleep_fn(interval)
@@ -653,6 +780,7 @@ def watch_briefs(
         counts["duplicate_skips"], counts["approval_pauses"],
         last_brief_hash, last_command_path,
     )
+    _dash("done")
     return counts
 
 
@@ -777,12 +905,29 @@ def main(argv: "list[str] | None" = None) -> int:
     if result["blocked"]:
         print(f"BLOCKED: {result['block_reason']}")
         print("A PENDING_APPROVAL.md has been written to approvals/.")
+        write_dashboard(
+            state_dir=state_dir, brief_path=brief_path, command_path=command_path,
+            history_dir=history_dir, approvals_dir=approvals_dir, planner=planner,
+            last_result="blocked", last_error=result["block_reason"], watcher_state="done",
+        )
         return 1
 
     if not result["ok"]:
-        print(f"ERROR: {result['error']}")
+        err = result["error"]
+        print(f"ERROR: {err}")
+        write_dashboard(
+            state_dir=state_dir, brief_path=brief_path, command_path=command_path,
+            history_dir=history_dir, approvals_dir=approvals_dir, planner=planner,
+            last_result="missing_key" if "OPENAI_API_KEY" in err else "error",
+            last_error=err, watcher_state="done",
+        )
         return 1
 
+    write_dashboard(
+        state_dir=state_dir, brief_path=brief_path, command_path=command_path,
+        history_dir=history_dir, approvals_dir=approvals_dir, planner=planner,
+        last_result="ready", watcher_state="done",
+    )
     print(f"Command written: {result['command_path']}")
     print(f"Archived:        {result['archive_path']}")
     if result["tokens_used"]:
