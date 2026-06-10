@@ -37,6 +37,37 @@
     "block_deleted_files": true,
     "block_binary_files": true
   },
+  "test_requirements": {
+    "enabled": true,
+    "docs_only_requires_tests": false,
+    "scripts_require_tests": true,
+    "source_requires_tests": true,
+    "config_requires_tests": true,
+    "tests_changes_require_self_test": true,
+    "required_test_commands": {
+      "scripts": [
+        "python tests/test_bridge_phase_d.py",
+        "python tests/test_bridge_phase_d2.py",
+        "python tests/test_bridge_phase_d3.py",
+        "python tests/test_bridge_phase_d4.py"
+      ],
+      "claude_runner": [
+        "python tests/test_bridge_phase_d.py",
+        "python tests/test_bridge_phase_d2.py",
+        "python tests/test_bridge_phase_d3.py",
+        "python tests/test_bridge_phase_d4.py"
+      ],
+      "auto_exchange": [
+        "python tests/test_auto_exchange_x3.py",
+        "python tests/test_auto_exchange_x4.py",
+        "python tests/test_auto_exchange_x5.py",
+        "python tests/test_auto_exchange_command_inbox.py"
+      ],
+      "risk_classifier": [
+        "python tests/test_risk_classifier.py"
+      ]
+    }
+  },
   "execution_scope": {
     "allowed_path_prefixes": [
       "docs/",

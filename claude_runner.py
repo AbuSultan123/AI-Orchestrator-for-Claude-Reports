@@ -26,6 +26,12 @@ Gate evaluation order (short-circuits on first failure):
                                after _invoke_claude() returns in execute mode;
                                read-only git capture; a block marks the run
                                unsafe even when the invocation succeeded.
+   10. TEST_REQUIREMENT_GATE -- changed paths from the D4 diff must have their
+                               required tests explicitly declared as run via
+                               the tests_run parameter (Phase D D5).  Runs
+                               only after Gate 9 passes; never executes tests
+                               itself; blocks when requirements are missing
+                               or cannot be determined.
 
 Phase D D3: every execute-path decision (gate block, gates passed, claude
 invocation outcome) is appended as one JSON line to an append-only audit log
@@ -60,6 +66,7 @@ GATE_EXECUTE_ENABLED = "EXECUTE_ENABLED_GATE"
 GATE_SCOPE_CONSTRAINTS = "SCOPE_CONSTRAINTS_GATE"
 GATE_AUDIT           = "EXECUTION_AUDIT_GATE"
 GATE_POST_RUN_DIFF   = "POST_RUN_DIFF_GATE"
+GATE_TEST_REQUIREMENT = "TEST_REQUIREMENT_GATE"
 
 _DOCS_ONLY_PATTERNS = (
     "documentation only", "readme update", "spec update",
@@ -422,6 +429,7 @@ def _build_execution_audit_event(
     env: "dict | None" = None,
     invoked: bool = False,
     post_run_diff: "dict | None" = None,
+    test_requirements: "dict | None" = None,
 ) -> dict:
     """Build one audit event dict (Phase D D3).
 
@@ -463,6 +471,10 @@ def _build_execution_audit_event(
     # never the full diff body or file contents.
     if post_run_diff is not None:
         event["post_run_diff"] = post_run_diff
+    # Phase D D5: summary fields only (classification, required/declared
+    # counts) -- never test output or logs.
+    if test_requirements is not None:
+        event["test_requirements"] = test_requirements
     return event
 
 
@@ -726,6 +738,214 @@ def _gate_post_run_diff(diff_result: dict, config: dict) -> "tuple[bool, str]":
 
 
 # ---------------------------------------------------------------------------
+# Phase D D5: test-requirement gate (Gate 10)
+# ---------------------------------------------------------------------------
+
+# Default Gate 10 config when "test_requirements" is missing.
+_TEST_REQ_DEFAULTS = {
+    "enabled": True,
+    "docs_only_requires_tests": False,
+    "scripts_require_tests": True,
+    "source_requires_tests": True,
+    "config_requires_tests": True,
+    "tests_changes_require_self_test": True,
+    "required_test_commands": {},
+}
+
+# Single-category classification labels.
+_TEST_REQ_LABELS = {
+    "docs":            "docs_only",
+    "tests":           "tests_only",
+    "scripts":         "scripts_change",
+    "claude_runner":   "claude_runner_change",
+    "auto_exchange":   "auto_exchange_change",
+    "risk_classifier": "risk_classifier_change",
+    "config":          "config_change",
+    "unknown":         "unknown_code_change",
+}
+
+
+def _test_req_cfg(config: dict) -> dict:
+    cfg = config.get("test_requirements")
+    if not isinstance(cfg, dict):
+        cfg = {}
+    merged = dict(_TEST_REQ_DEFAULTS)
+    merged.update(cfg)
+    return merged
+
+
+def _extract_changed_paths_from_diff_result(diff_result: dict) -> "list[str]":
+    """Changed paths from a D4 diff result: tracked changes plus non-runtime
+    untracked files.  Runtime-exempt untracked artifacts are excluded."""
+    paths = list(diff_result.get("changed_files", []))
+    paths += list(diff_result.get("untracked_files", []))
+    return [p.replace("\\", "/") for p in paths]
+
+
+def _classify_test_requirements(changed_paths: "list[str]", config: dict) -> dict:
+    """Classify which tests the post-run changed paths require (Phase D D5).
+
+    Pure function: no subprocess calls, no file I/O, never executes tests.
+
+    Returns a dict:
+      classification    no_changes / docs_only / tests_only / scripts_change /
+                        claude_runner_change / auto_exchange_change /
+                        risk_classifier_change / config_change /
+                        unknown_code_change / mixed_change
+      categories        sorted list of per-path categories seen
+      tests_required    bool
+      requires_any_test bool -- at least one declared test required, no
+                        specific command mandated (docs-with-flag case)
+      determinable      False when requirements cannot be resolved -- the
+                        gate must block
+      required_tests    ordered unique list of required test commands
+      reason            short human-readable summary
+    """
+    cfg      = _test_req_cfg(config)
+    commands = cfg.get("required_test_commands")
+    if not isinstance(commands, dict):
+        commands = {}
+
+    categories = set()
+    test_file_paths = []
+    for path in changed_paths:
+        p    = path.replace("\\", "/").lower()
+        base = p.rsplit("/", 1)[-1]
+        if p.startswith("docs/") or ("/" not in p and p.endswith(".md")):
+            categories.add("docs")
+        elif p.startswith("tests/"):
+            categories.add("tests")
+            test_file_paths.append(path.replace("\\", "/"))
+        elif base == "claude_runner.py":
+            categories.add("claude_runner")
+        elif base == "auto_exchange.py":
+            categories.add("auto_exchange")
+        elif base == "risk_classifier.py":
+            categories.add("risk_classifier")
+        elif p.startswith("scripts/"):
+            categories.add("scripts")
+        elif p.startswith("config/"):
+            categories.add("config")
+        else:
+            categories.add("unknown")
+
+    result = {
+        "classification":   "no_changes",
+        "categories":       sorted(categories),
+        "tests_required":   False,
+        "requires_any_test": False,
+        "determinable":     True,
+        "required_tests":   [],
+        "reason":           "no post-run changes -- no tests required",
+    }
+    if not changed_paths:
+        return result
+
+    if len(categories) == 1:
+        result["classification"] = _TEST_REQ_LABELS[next(iter(categories))]
+    else:
+        result["classification"] = "mixed_change"
+
+    def _require_suite(key: str) -> None:
+        result["tests_required"] = True
+        cmds = commands.get(key) or []
+        if key == "config" and not cmds:
+            # config changes fall back to the bridge/runner suite
+            cmds = commands.get("claude_runner") or []
+        if not cmds:
+            result["determinable"] = False
+            return
+        for c in cmds:
+            if c not in result["required_tests"]:
+                result["required_tests"].append(c)
+
+    if "docs" in categories and cfg.get("docs_only_requires_tests"):
+        result["tests_required"]    = True
+        result["requires_any_test"] = True
+    if "tests" in categories and cfg.get("tests_changes_require_self_test"):
+        result["tests_required"] = True
+        for tf in test_file_paths:
+            cmd = f"python {tf}"
+            if cmd not in result["required_tests"]:
+                result["required_tests"].append(cmd)
+    if "claude_runner" in categories and cfg.get("source_requires_tests"):
+        _require_suite("claude_runner")
+    if "auto_exchange" in categories and cfg.get("source_requires_tests"):
+        _require_suite("auto_exchange")
+    if "risk_classifier" in categories and cfg.get("source_requires_tests"):
+        _require_suite("risk_classifier")
+    if "scripts" in categories and cfg.get("scripts_require_tests"):
+        _require_suite("scripts")
+    if "config" in categories and cfg.get("config_requires_tests"):
+        _require_suite("config")
+    if "unknown" in categories:
+        # Unknown source/code changes: requirements cannot be determined.
+        result["tests_required"] = True
+        result["determinable"]   = False
+
+    if not result["determinable"]:
+        result["reason"] = (
+            f"{result['classification']}: test requirements cannot be "
+            "determined -- blocked"
+        )
+    elif result["tests_required"]:
+        result["reason"] = (
+            f"{result['classification']}: {len(result['required_tests'])} "
+            "required test command(s)"
+        )
+    else:
+        result["reason"] = f"{result['classification']}: no tests required"
+    return result
+
+
+def _gate_test_requirements(
+    requirement_result: dict,
+    config: dict,
+    tests_run: "list | None" = None,
+) -> "tuple[bool, str]":
+    """Gate 10 (Phase D D5): required tests must be explicitly declared as run.
+
+    tests_run is an explicit declaration (list of test command strings) passed
+    into check_and_run() -- nothing is inferred from shell history and no test
+    is ever executed by this gate.  Undeterminable requirements block.
+    Partially satisfied requirements block.
+    """
+    cfg = _test_req_cfg(config)
+    if not cfg.get("enabled", True):
+        return True, "test requirement gate disabled by config"
+
+    cls = requirement_result.get("classification", "unknown_code_change")
+    if not requirement_result.get("determinable", True):
+        return False, f"test requirements not determinable ({cls}) -- blocked"
+    if not requirement_result.get("tests_required", False):
+        return True, f"no tests required ({cls})"
+
+    declared = []
+    for t in (tests_run or []):
+        if isinstance(t, str) and t.strip():
+            declared.append(" ".join(t.replace("\\", "/").lower().split()))
+
+    if requirement_result.get("requires_any_test") and not declared:
+        return False, f"tests required ({cls}) but none declared as run"
+
+    missing = []
+    for req in requirement_result.get("required_tests", []):
+        rn     = " ".join(req.replace("\\", "/").lower().split())
+        tokens = rn.split()
+        path_token = tokens[-1] if tokens else rn
+        if any(d == rn or path_token in d for d in declared):
+            continue
+        missing.append(req)
+    if missing:
+        return False, (
+            f"required tests not declared as run ({cls}): "
+            f"{len(missing)} missing, e.g. {missing[:3]}"
+        )
+    n = len(requirement_result.get("required_tests", []))
+    return True, f"required tests declared as run ({cls}): {n} satisfied"
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -740,6 +960,7 @@ def check_and_run(
     report_hash: str = "",
     logger: "logging.Logger | None" = None,
     env: "dict | None" = None,
+    tests_run: "list | None" = None,
 ) -> dict:
     """
     Run all pre-execution gates and (in execute mode) invoke Claude Code.
@@ -756,6 +977,9 @@ def check_and_run(
     report_hash   : SHA-256 of the current report (for loop detection)
     logger        : bridge logger instance
     env           : environment mapping for Gate 7 (None = os.environ)
+    tests_run     : explicit declaration of test commands run during the
+                    execution (Phase D D5, Gate 10).  Nothing is inferred;
+                    None/empty means no tests were declared.
 
     Returns
     -------
@@ -870,7 +1094,8 @@ def check_and_run(
     # Builds and appends one audit event.  Booleans and gate metadata only;
     # never env values, secrets, or task/command body content.
     def _audit(event_type, gate, gate_result, reason,
-               ran=False, returncode=None, invoked=False, post_run_diff=None):
+               ran=False, returncode=None, invoked=False, post_run_diff=None,
+               test_requirements=None):
         event = _build_execution_audit_event(
             event_type=event_type,
             mode=mode,
@@ -886,6 +1111,7 @@ def check_and_run(
             env=env,
             invoked=invoked,
             post_run_diff=post_run_diff,
+            test_requirements=test_requirements,
         )
         ok_a, msg_a = _append_execution_audit_log(event, config, base_dir=base_dir)
         if not ok_a:
@@ -969,7 +1195,27 @@ def check_and_run(
     }
     result["post_run_diff"] = diff_summary
 
-    # Post-invocation audit record (D3), extended with the D4 summary.
+    # --- Gate 10: Test requirements (Phase D D5) ---
+    # Evaluated only after Gate 9 passes.  Pure classification of the D4
+    # changed paths against declared tests_run; never executes tests.
+    ok10, msg10, test_summary = True, "", None
+    if ok9:
+        changed_paths = _extract_changed_paths_from_diff_result(diff_result)
+        req = _classify_test_requirements(changed_paths, config)
+        ok10, msg10 = _gate_test_requirements(req, config, tests_run=tests_run)
+        _log_gate(logger, GATE_TEST_REQUIREMENT, ok10, msg10)
+        test_summary = {
+            "classification":           req["classification"],
+            "tests_required":           req["tests_required"],
+            "determinable":             req["determinable"],
+            "required_test_count":      len(req["required_tests"]),
+            "required_tests":           req["required_tests"][:6],
+            "declared_tests_run_count": len(tests_run or []),
+            "passed":                   ok10,
+        }
+        result["test_requirements"] = test_summary
+
+    # Post-invocation audit record (D3), extended with D4/D5 summaries.
     ok_audit, audit_msg = _audit(
         "claude_invocation", "none", "passed",
         "claude exited cleanly" if ran else
@@ -978,20 +1224,31 @@ def check_and_run(
         returncode=0 if ran else 1,
         invoked=True,
         post_run_diff=diff_summary,
+        test_requirements=test_summary,
     )
     if not ok_audit:
         # Execution already happened; surface the audit failure, never hide it.
         result["audit_log_error"] = audit_msg
 
-    if ok9:
-        result["checks_passed"].append(GATE_POST_RUN_DIFF)
+    if not ok9:
+        # D4 blocked: the run is unsafe even though the invocation completed.
+        result["gate_triggered"] = GATE_POST_RUN_DIFF
+        result["checks_failed"].append({"gate": GATE_POST_RUN_DIFF, "reason": msg9})
+        _audit("post_run_diff_blocked", GATE_POST_RUN_DIFF, "blocked", msg9,
+               ran=ran, invoked=True, post_run_diff=diff_summary)
         return result
+    result["checks_passed"].append(GATE_POST_RUN_DIFF)
 
-    # D4 blocked: the run is unsafe even though the invocation completed.
-    result["gate_triggered"] = GATE_POST_RUN_DIFF
-    result["checks_failed"].append({"gate": GATE_POST_RUN_DIFF, "reason": msg9})
-    _audit("post_run_diff_blocked", GATE_POST_RUN_DIFF, "blocked", msg9,
-           ran=ran, invoked=True, post_run_diff=diff_summary)
+    if not ok10:
+        # D5 blocked: required tests missing -- the run is unsafe even though
+        # the invocation completed and the diff itself was within scope.
+        result["gate_triggered"] = GATE_TEST_REQUIREMENT
+        result["checks_failed"].append({"gate": GATE_TEST_REQUIREMENT, "reason": msg10})
+        _audit("test_requirement_blocked", GATE_TEST_REQUIREMENT, "blocked", msg10,
+               ran=ran, invoked=True, post_run_diff=diff_summary,
+               test_requirements=test_summary)
+        return result
+    result["checks_passed"].append(GATE_TEST_REQUIREMENT)
     return result
 
 
