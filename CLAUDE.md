@@ -57,3 +57,30 @@ explicit `--use-api` flag.
 * Multi-report context chaining
 * Archived task history in `tasks/`
 * `--json` output mode
+
+## Claude Code permissions and safety
+
+Full recipe: [`docs/CLAUDE-CODE-UNATTENDED-PERMISSIONS.md`](docs/CLAUDE-CODE-UNATTENDED-PERMISSIONS.md)
+
+**Command style** — always use short, single PowerShell commands:
+
+* One command per tool call
+* Run from the project root — do not use `Set-Location` or `cd`
+* Do not chain commands with `;` or `&&`
+* Do not use pipes unless absolutely necessary
+* Summarize long outputs; do not paste full logs
+
+**Allowed without asking:**
+local tests, `git status/log/diff/add/commit`, docs/templates/scripts edits,
+`python bridge.py --once --first --planner local --runner dry-run`
+
+**Require explicit approval before running:**
+
+* `--planner openai` (any OpenAI API call)
+* `--runner execute` or `--execute`
+* Claude Code execution from inside the bridge
+* `APPROVED.flag` / `REJECTED.flag`
+* `git push`, `git tag`, GitHub release, PR creation
+* Any modification to TradingView Light or pinescript-agents
+
+**Never print:** `OPENAI_API_KEY`, `.env` contents, credentials, tokens, or secrets.
