@@ -1,0 +1,217 @@
+"""
+execution_planner.py -- X6-D3: dry-run ExecutionUnit planner.
+PLANNING ONLY -- nothing here can execute anything.
+
+This module:
+  - converts a parsed command (X6-D1) plus its gate result (X6-D2) into a
+    dry-run ExecutionUnit plan for HUMAN REVIEW ONLY
+  - treats every command as an opaque string; planned steps are text
+  - never executes command text and never spawns processes
+    (the subprocess module is never imported here)
+  - never makes network calls and never talks to any LLM API
+  - never modifies files (the CLI only reads and prints)
+  - never imports the runner, the bridge, or the Auto-Exchange modules
+  - is connected to no runtime execution path
+
+Hard safety invariants in every plan, regardless of input:
+    x6_enabled              = False
+    can_execute             = False
+    dry_run_only            = True
+    created_for_review_only = True
+    requires_human_approval = True
+
+CLI (read-only):
+    python execution_planner.py --input inbox/chatgpt-commands/latest.md --json
+
+Python 3.8+ standard library only.
+"""
+
+import argparse
+import json
+import re
+import sys
+from pathlib import Path
+
+from command_parser import parse_command
+from command_gates import (
+    evaluate_command,
+    STATUS_BLOCKED,
+    STATUS_NEEDS_REVIEW,
+    STATUS_PASSED_REVIEW,
+)
+
+# Baseline forbidden paths (mirrors the X6-D1 parser baseline).
+_BASELINE_FORBIDDEN_PATHS = [
+    ".git/",
+    ".env",
+    "TradingView Light/",
+    "pinescript-agents/",
+]
+
+# Tokens that mark an individual planned step as blocked rather than
+# review-only.  The step text is still never executed either way.
+_RISKY_STEP_TOKENS = (
+    "rm -rf", "rm -r ", "rmdir", "del /", "remove-item",
+    "git push", "git tag", "git reset --hard", "git clean -f",
+    "gh release", "gh pr create", "force push", "force-push",
+    "pip install", "npm install", "yarn add",
+    "curl ", "wget ", "http://", "https://", "invoke-webrequest",
+    "chmod ", "chown ", "drop table", "delete from",
+    "--execute", "--runner execute", "bridge_execute_enabled",
+)
+
+# Secrets patterns (matches are redacted, never echoed).
+_SECRET_RXS = [
+    re.compile(r"sk-[A-Za-z0-9_-]{10,}"),
+    re.compile(r"ghp_[A-Za-z0-9]{20,}"),
+    re.compile(r"(?:OPENAI|ANTHROPIC)_API_KEY\s*[=:]\s*\S+"),
+    re.compile(r"password\s*[=:]\s*\S+", re.IGNORECASE),
+    re.compile(r"secret\s*[=:]\s*\S{8,}", re.IGNORECASE),
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+]
+
+# Conservative rollback notes: prose only, no automatic actions.
+_ROLLBACK_PLAN = [
+    "No automatic rollback is performed or recommended.",
+    "Inspect any changes manually with read-only git status/diff.",
+    "Stable bridge-v0.3-* checkpoint tags exist for manual reference.",
+    "Destructive rollback commands (e.g. git reset --hard, git checkout .) "
+    "are never executed automatically and require explicit human judgment.",
+]
+
+_REQUIRED_APPROVALS = [
+    "human_review_of_this_plan",
+    "explicit_per_command_human_approval",
+    "future_x6_d4_staged_execution_approval (X6-D4 not implemented)",
+]
+
+
+def _redact(text: str) -> str:
+    out = text
+    for rx in _SECRET_RXS:
+        out = rx.sub("[REDACTED]", out)
+    return out
+
+
+def _is_risky_step(text_lower: str) -> bool:
+    return any(t in text_lower for t in _RISKY_STEP_TOKENS)
+
+
+def build_execution_unit(parsed: dict, gate_result: dict) -> dict:
+    """Build a dry-run ExecutionUnit from X6-D1 + X6-D2 results.
+
+    The plan mirrors the gate verdict: blocked gates produce a blocked plan,
+    review escalations produce a needs_review plan, clean results produce a
+    passed_for_review plan.  Every plan is review-only; planned steps are
+    plain strings, secrets are redacted, and nothing is ever executed.
+    """
+    task_id = parsed.get("task_id", "") or gate_result.get("task_id", "")
+    status  = gate_result.get("overall_status", STATUS_BLOCKED)
+
+    unit: dict = {
+        "plan_id":         f"plan-{task_id}" if task_id else "plan-unparsed",
+        "task_id":         task_id,
+        "title":           _redact(parsed.get("title", "")),
+        "mode":            "manual_review",
+        "intent":          gate_result.get("intent", "unclear"),
+        "risk_level":      gate_result.get("risk_level", "high"),
+        "overall_status":  status,
+        "allowed_paths":   list(parsed.get("allowed_paths", [])),
+        "forbidden_paths": list(parsed.get("forbidden_paths",
+                                           _BASELINE_FORBIDDEN_PATHS)),
+        "planned_steps":   [],
+        "required_tests":  [_redact(t) for t in parsed.get("required_tests", [])],
+        "required_approvals": list(_REQUIRED_APPROVALS),
+        "blocked_reasons": [_redact(b) for b in gate_result.get("blocked_reasons", [])],
+        "warnings":        [_redact(w) for w in gate_result.get("warnings", [])],
+        "rollback_plan":   list(_ROLLBACK_PLAN),
+        "audit_notes": [
+            "plan generated by execution_planner.py (X6-D3) for human review only",
+            f"gates passed: {len(gate_result.get('gates_passed', []))}; "
+            f"gates failed: {len(gate_result.get('gates_failed', []))}",
+            "nothing was executed; no process, network, or LLM call was made",
+        ],
+        "source_hash":     parsed.get("raw_source_hash", ""),
+        "created_for_review_only": True,
+        "x6_enabled":              False,
+        "can_execute":             False,
+        "dry_run_only":            True,
+        "requires_human_approval": True,
+    }
+
+    steps = []
+    if status == STATUS_BLOCKED:
+        head = "; ".join(unit["blocked_reasons"][:2]) or "command not evaluable"
+        steps.append(f"[blocked] Plan is blocked ({head}). "
+                     "No step below may be carried out.")
+    elif status == STATUS_NEEDS_REVIEW:
+        steps.append("[review-only] Plan needs human review before anything "
+                     "further is even considered.")
+    steps.append("[review-only] Human reads the command markdown and the "
+                 "X6-D2 gate report.")
+    for cmd in parsed.get("commands", []):
+        red = _redact(cmd)
+        marker = ("[blocked]"
+                  if status == STATUS_BLOCKED or _is_risky_step(red.lower())
+                  else "[review-only]")
+        steps.append(f"{marker} Proposed command (text only, never executed): {red}")
+    for t in unit["required_tests"]:
+        steps.append(f"[review-only] Proposed test (text only, never executed): {t}")
+    steps.append("[review-only] Human decides the next action; nothing "
+                 "proceeds without explicit approval.")
+    unit["planned_steps"] = steps
+    return unit
+
+
+def plan_markdown(text: str, source_path: str = "") -> dict:
+    """Parse (X6-D1), gate (X6-D2), and plan (X6-D3) command markdown.
+    Read-only end to end."""
+    parsed = parse_command(text, source_path=source_path)
+    gates  = evaluate_command(
+        parsed, source_text=text if isinstance(text, str) else "")
+    return build_execution_unit(parsed, gates)
+
+
+def main(argv: "list[str] | None" = None) -> int:
+    """Read-only CLI: parse + gate + plan a command file and print JSON.
+    Never executes anything, never modifies files."""
+    parser = argparse.ArgumentParser(
+        description="X6-D3 execution planner -- dry-run plan only; "
+                    "never executes command content.")
+    parser.add_argument(
+        "--input",
+        default="inbox/chatgpt-commands/latest.md",
+        help="command markdown to plan (default: inbox/chatgpt-commands/latest.md)",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="print the ExecutionUnit as JSON (JSON is the only output format)",
+    )
+    args = parser.parse_args(argv)
+
+    path = Path(args.input)
+    if not path.is_absolute():
+        path = Path(__file__).parent / path
+    if not path.exists():
+        parsed = {"parse_status": "missing_file"}
+        unit = build_execution_unit(parsed, evaluate_command(parsed))
+        unit["warnings"].append(f"input not found: {path.name}")
+        print(json.dumps(unit, indent=2, ensure_ascii=False))
+        return 1
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        parsed = {"parse_status": "read_error"}
+        unit = build_execution_unit(parsed, evaluate_command(parsed))
+        unit["warnings"].append(f"cannot read input: {exc}")
+        print(json.dumps(unit, indent=2, ensure_ascii=False))
+        return 1
+
+    unit = plan_markdown(text, source_path=str(path))
+    print(json.dumps(unit, indent=2, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
