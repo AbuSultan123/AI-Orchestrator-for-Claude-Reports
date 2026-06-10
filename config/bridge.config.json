@@ -39,6 +39,7 @@
   },
   "test_requirements": {
     "enabled": true,
+    "declared_tests_run_file": "state/tests-run.json",
     "docs_only_requires_tests": false,
     "scripts_require_tests": true,
     "source_requires_tests": true,

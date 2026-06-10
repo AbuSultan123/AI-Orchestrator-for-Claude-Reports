@@ -124,14 +124,23 @@ def _ts() -> str:
     return datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
 
 
-def set_status(status: str, detail: str = "") -> None:
+def set_status(status: str, detail: str = "", extra: "dict | None" = None) -> None:
+    """Write state/bridge-status.json.
+
+    extra (Phase D D6-A): optional execute-result summary dict, stored under
+    the "execute_summary" key.  Omitted entirely when None, so dry-run status
+    payloads are byte-identical to the pre-D6 shape.
+    """
     STATE_DIR.mkdir(exist_ok=True)
-    STATUS_FILE.write_text(json.dumps({
+    payload = {
         "status":    status,
         "detail":    detail,
         "timestamp": datetime.now().isoformat(),
         "version":   VERSION,
-    }, indent=2), encoding="utf-8")
+    }
+    if extra:
+        payload["execute_summary"] = extra
+    STATUS_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 def write_pid() -> None:
@@ -165,6 +174,93 @@ def read_decision() -> dict:
         except (json.JSONDecodeError, OSError):
             pass
     return {}
+
+
+# ---------------------------------------------------------------------------
+# Phase D D6-A: declared tests + execute-result summary plumbing
+# ---------------------------------------------------------------------------
+
+def load_declared_tests_run(config: dict, logger: logging.Logger) -> "list | None":
+    """Read explicitly declared test commands for Gate 10 (Phase D D5/D6-A).
+
+    Reads the JSON file named by
+    config["test_requirements"]["declared_tests_run_file"] (relative paths
+    resolve against BASE_DIR).  Expected shape: {"tests_run": ["python ...."]}.
+
+    Returns the list of command strings, or None when the setting or file is
+    absent, unreadable, invalid, or empty.  Never infers tests, never runs
+    tests, never raises.
+    """
+    try:
+        tr_cfg = config.get("test_requirements")
+        if not isinstance(tr_cfg, dict):
+            return None
+        rel = tr_cfg.get("declared_tests_run_file", "")
+        if not isinstance(rel, str) or not rel.strip():
+            return None
+        path = Path(rel)
+        if not path.is_absolute():
+            path = BASE_DIR / path
+        if not path.exists():
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+        tests = data.get("tests_run") if isinstance(data, dict) else None
+        if not isinstance(tests, list):
+            logger.warning("Declared-tests file has no 'tests_run' list -- using None")
+            return None
+        cleaned = [t.strip() for t in tests if isinstance(t, str) and t.strip()]
+        return cleaned or None
+    except (OSError, json.JSONDecodeError, ValueError, AttributeError) as exc:
+        logger.warning(f"Declared-tests file unreadable -- using None: {exc}")
+        return None
+
+
+def build_execute_summary(runner_result: dict) -> "dict | None":
+    """Summary-only execute-result fields for logs and bridge-status.json.
+
+    Returns None when the runner result has no execute-path fields (dry-run,
+    Gate 7 fallback, pre-invocation blocks), so dry-run output is unchanged.
+    Contains classifications, booleans, and a truncated audit error only --
+    never diff bodies, command bodies, test output, env values, or secrets.
+    """
+    prd       = runner_result.get("post_run_diff")
+    tr        = runner_result.get("test_requirements")
+    audit_err = runner_result.get("audit_log_error", "")
+    if not prd and not tr and not audit_err:
+        return None
+    summary: dict = {}
+    if prd:
+        summary["post_run_diff"] = {
+            "classification": prd.get("classification", ""),
+            "safe":           bool(prd.get("safe", False)),
+        }
+    if tr:
+        summary["test_requirements"] = {
+            "classification": tr.get("classification", ""),
+            "tests_required": bool(tr.get("tests_required", False)),
+            "determinable":   bool(tr.get("determinable", True)),
+            "passed":         bool(tr.get("passed", False)),
+        }
+    if audit_err:
+        summary["audit_log_error"] = str(audit_err)[:300]
+    return summary
+
+
+def _format_execute_summary(summary: dict) -> str:
+    parts = []
+    prd = summary.get("post_run_diff")
+    if prd:
+        parts.append(f"post_run_diff={prd['classification']} safe={prd['safe']}")
+    tr = summary.get("test_requirements")
+    if tr:
+        parts.append(
+            f"test_requirements={tr['classification']} "
+            f"required={tr['tests_required']} "
+            f"determinable={tr['determinable']} passed={tr['passed']}"
+        )
+    if summary.get("audit_log_error"):
+        parts.append(f"audit_log_error={summary['audit_log_error']}")
+    return " | ".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -467,6 +563,10 @@ def process_report(
         except OSError:
             pass
 
+    # Phase D D6-A: execute-result summary (None for dry-run and blocks
+    # before invocation, so non-execute status output is unchanged).
+    execute_summary: "dict | None" = None
+
     # --- Archive task to outbox ---
     task_dest = archive_task(ts, logger)
     if task_dest:
@@ -482,6 +582,9 @@ def process_report(
     elif d == "low_risk_auto_allowed":
         logger.info(f"low_risk_auto_allowed: running pre-execution checklist (runner={runner})")
         from claude_runner import check_and_run
+        # Phase D D6-A: declared tests are read only on the execute path;
+        # dry-run never touches the declared-tests file.
+        tests_run = load_declared_tests_run(config, logger) if runner == "execute" else None
         runner_result = check_and_run(
             decision=decision,
             task_path=ORCH_STATE_DIR / "NEXT_TASK.md",
@@ -492,6 +595,7 @@ def process_report(
             hashes=hashes,
             report_hash=h,
             logger=logger,
+            tests_run=tests_run,
         )
         passed  = runner_result["checks_passed"]
         failed  = runner_result["checks_failed"]
@@ -504,6 +608,11 @@ def process_report(
         )
         if runner_result["loop_detected"]:
             logger.warning("Runner: loop detection fired -- same report hash seen recently")
+        # Phase D D6-A: surface execute-result summaries (D4/D5/D3 fields).
+        # Summary fields only -- never diff bodies, test output, or secrets.
+        execute_summary = build_execute_summary(runner_result)
+        if execute_summary:
+            logger.info("Runner execute summary: " + _format_execute_summary(execute_summary))
 
     # --- Record hash ---
     hashes[h] = {
@@ -524,7 +633,7 @@ def process_report(
     except OSError as exc:
         logger.warning(f"Could not move report to state/processed/: {exc}")
 
-    set_status("idle", f"Last: {report_path.name} -> {d} [{planner}]")
+    set_status("idle", f"Last: {report_path.name} -> {d} [{planner}]", extra=execute_summary)
     logger.info(f"--- Done: {report_path.name} ---")
     return True
 
