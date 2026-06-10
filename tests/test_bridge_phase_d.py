@@ -50,6 +50,13 @@ def _make_config():
         "forbidden_task_patterns": ["git push", "git tag"],
         "max_auto_runs_per_hour": 3,
         "claude_timeout_seconds": 10,
+        # Phase D D2: Gate 8 default-denies when execution_scope is missing,
+        # so the execute-path tests here need a valid scope config.
+        "execution_scope": {
+            "allowed_path_prefixes": ["docs/", "tests/", "scripts/"],
+            "allow_root_markdown": True,
+            "config_read_only": True,
+        },
     }
 
 

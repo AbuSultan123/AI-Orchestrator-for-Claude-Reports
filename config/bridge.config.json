@@ -21,6 +21,15 @@
       "max_output_tokens": 2048
     }
   },
+  "execution_scope": {
+    "allowed_path_prefixes": [
+      "docs/",
+      "tests/",
+      "scripts/"
+    ],
+    "allow_root_markdown": true,
+    "config_read_only": true
+  },
   "forbidden_task_patterns": [
     "git push",
     "git tag",

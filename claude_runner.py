@@ -17,6 +17,10 @@ Gate evaluation order (short-circuits on first failure):
     4. GIT_SAFETY_GATE      -- working tree must be clean (docs exception applies)
     5. RATE_LIMIT_GATE      -- auto-run count < max_auto_runs_per_hour (last hour)
     6. LOOP_DETECTION       -- warn (Phase C) / hard-stop (Phase D) if loop seen
+    7. EXECUTE_ENABLED_GATE -- execute mode requires BRIDGE_EXECUTE_ENABLED=1 (Phase D D0/D1)
+    8. SCOPE_CONSTRAINTS_GATE -- task path references must be inside the
+                               execution scope allowlist (Phase D D2).
+                               Execute path only; dry-run never evaluates it.
 
 Python 3.8+ standard library only.  No external dependencies.
 """
@@ -24,6 +28,7 @@ Python 3.8+ standard library only.  No external dependencies.
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -41,6 +46,7 @@ GATE_GIT_SAFETY      = "GIT_SAFETY_GATE"
 GATE_RATE_LIMIT      = "RATE_LIMIT_GATE"
 GATE_LOOP            = "LOOP_DETECTION"
 GATE_EXECUTE_ENABLED = "EXECUTE_ENABLED_GATE"
+GATE_SCOPE_CONSTRAINTS = "SCOPE_CONSTRAINTS_GATE"
 
 _DOCS_ONLY_PATTERNS = (
     "documentation only", "readme update", "spec update",
@@ -251,6 +257,137 @@ def _gate_execute_enabled(
 
 
 # ---------------------------------------------------------------------------
+# Phase D D2: execution scope constraints (Gate 8)
+# ---------------------------------------------------------------------------
+
+# Hard blocklist: always enforced regardless of execution_scope config.
+# Checked case-insensitively against the backslash-normalized task text.
+_SCOPE_BLOCKED_SUBSTRINGS = (
+    ".git/",            # repository internals
+    "../",              # parent traversal out of repo root
+    "~/",               # home directory
+    "$home",            # home directory (POSIX env var)
+    "%userprofile%",    # home directory (Windows env var)
+    "c:/windows",       # Windows system folder
+    "/etc/", "/usr/", "/var/", "/home/", "/tmp/",
+    "/opt/", "/bin/", "/root/",
+    "tradingview",      # TradingView Light -- never in scope
+    "pinescript",       # pinescript-agents -- never in scope
+    "id_rsa", ".pem", ".pfx", ".p12", ".netrc", ".npmrc",
+    "secrets.json", "credentials.json",
+)
+
+# .env / .env.* file references ("environment" must not trigger).
+_SCOPE_ENV_FILE_RX = re.compile(
+    r"(?:^|[\s\"'`(=/])\.env(?:\.[\w.-]+)?\b", re.MULTILINE
+)
+
+# Absolute Windows path (any drive letter, after backslash normalization).
+_SCOPE_DRIVE_RX = re.compile(r"\b[A-Za-z]:/")
+
+# Absolute POSIX path (leading slash followed by at least one segment).
+_SCOPE_POSIX_ABS_RX = re.compile(
+    r"(?:^|[\s\"'`(=])/[\w.-]+/", re.MULTILINE
+)
+
+# Relative path-like tokens: a segment, a slash, then the rest of the path.
+_SCOPE_PATH_TOKEN_RX = re.compile(r"[\w.-]+/[\w./-]*")
+
+# Root markdown files (not part of a slash path, e.g. README.md).
+_SCOPE_ROOT_MD_RX = re.compile(r"(?<![\w./-])([\w-]+\.md)\b(?!/)", re.IGNORECASE)
+
+# Verbs that mark a config/ reference as a write (config is read-only scope).
+_SCOPE_WRITE_VERBS = (
+    "write", "edit", "modify", "update", "change", "overwrite",
+    "delete", "remove", "append", "rewrite", "create", "replace",
+)
+
+
+def _line_of(text: str, pos: int) -> str:
+    """Return the full line of text containing character offset pos."""
+    start = text.rfind("\n", 0, pos) + 1
+    end = text.find("\n", pos)
+    if end == -1:
+        end = len(text)
+    return text[start:end]
+
+
+def _gate_scope_constraints(task_text: str, config: dict) -> "tuple[bool, str]":
+    """Gate 8 (Phase D D2): execution scope constraints.
+
+    Positive allowlist: every path-like reference in the task text must fall
+    under a prefix listed in config["execution_scope"]["allowed_path_prefixes"].
+    Missing execution_scope config or an empty allowlist is a default deny.
+
+    A hard blocklist is enforced regardless of config: repo internals (.git/),
+    env/secret files, parent traversal, home and system directories, absolute
+    paths outside the repo, TradingView Light, and pinescript-agents.
+
+    Heuristic: a slash-containing token is treated as a path reference only if
+    it has a file extension somewhere or ends with a slash, so prose such as
+    "and/or" does not trip the gate.
+
+    Pure function: no side effects, no subprocess calls, no file I/O.
+    """
+    scope_cfg = config.get("execution_scope")
+    if not isinstance(scope_cfg, dict):
+        return False, "execution_scope config missing -- default deny"
+
+    allowed = []
+    for p in scope_cfg.get("allowed_path_prefixes", []):
+        if not isinstance(p, str) or not p.strip():
+            continue
+        norm_p = p.strip().replace("\\", "/").lower()
+        if not norm_p.endswith("/"):
+            norm_p += "/"
+        allowed.append(norm_p)
+    if not allowed:
+        return False, "execution_scope allowlist is empty -- default deny"
+
+    allow_root_md    = bool(scope_cfg.get("allow_root_markdown", False))
+    config_read_only = bool(scope_cfg.get("config_read_only", False))
+
+    norm    = task_text.replace("\\", "/")
+    lowered = norm.lower()
+
+    # --- Hard blocklist: config cannot override these ---
+    for pat in _SCOPE_BLOCKED_SUBSTRINGS:
+        if pat in lowered:
+            return False, f"Blocked path reference: {pat!r}"
+    if _SCOPE_ENV_FILE_RX.search(lowered):
+        return False, "Blocked path reference: .env file"
+    if _SCOPE_DRIVE_RX.search(norm):
+        return False, "Blocked absolute path (drive letter) -- outside repo scope"
+    if _SCOPE_POSIX_ABS_RX.search(norm):
+        return False, "Blocked absolute POSIX path -- outside repo scope"
+
+    # --- Positive allowlist over relative path-like tokens ---
+    for m in _SCOPE_PATH_TOKEN_RX.finditer(norm):
+        token = m.group(0)
+        tl    = token.lower()
+        if "." not in tl and not tl.endswith("/"):
+            continue   # prose like "and/or", not a path reference
+        if tl.startswith("config/"):
+            if not config_read_only:
+                return False, f"config/ reference not permitted: {token!r}"
+            line = _line_of(lowered, m.start())
+            if any(v in line for v in _SCOPE_WRITE_VERBS):
+                return False, f"config/ reference is not read-only: {token!r}"
+            continue
+        if any(tl.startswith(p) for p in allowed):
+            continue
+        return False, f"Path not in execution scope allowlist: {token!r}"
+
+    # --- Root markdown files (no directory component) ---
+    if not allow_root_md:
+        m = _SCOPE_ROOT_MD_RX.search(norm)
+        if m:
+            return False, f"Root markdown reference not permitted: {m.group(1)!r}"
+
+    return True, "All path references within execution scope"
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -403,6 +540,17 @@ def check_and_run(
         return result
     _log_gate(logger, GATE_EXECUTE_ENABLED, True, msg7)
     result["checks_passed"].append(GATE_EXECUTE_ENABLED)
+
+    # --- Gate 8: Scope constraints (Phase D D2) ---
+    # Evaluated only on the execute path, after Gate 7 has passed.  Dry-run
+    # returns earlier and never reaches this gate.
+    ok8, msg8 = _gate_scope_constraints(task_text, config)
+    _log_gate(logger, GATE_SCOPE_CONSTRAINTS, ok8, msg8)
+    if not ok8:
+        result["gate_triggered"] = GATE_SCOPE_CONSTRAINTS
+        result["checks_failed"].append({"gate": GATE_SCOPE_CONSTRAINTS, "reason": msg8})
+        return result
+    result["checks_passed"].append(GATE_SCOPE_CONSTRAINTS)
 
     # --- Execute mode (Phase D) ---
     logger.info("Runner [EXECUTE]: all gates passed. Invoking Claude Code...")
