@@ -1,13 +1,23 @@
 """
-auto_exchange.py -- X3 Auto-Exchange: Claude brief -> OpenAI review -> command file.
+auto_exchange.py -- Auto-Exchange X3/X4: Claude brief -> OpenAI review -> command file.
 
-Reads   outbox/chatgpt-briefs/latest.md
-Writes  inbox/chatgpt-commands/latest.md
-        state/chatgpt-command-history/<timestamp>-command.md
+X3 (single-shot):
+    Reads   outbox/chatgpt-briefs/latest.md
+    Writes  inbox/chatgpt-commands/latest.md
+            state/chatgpt-command-history/<timestamp>-command.md
+
+X4 (watch loop):
+    Polls   outbox/chatgpt-briefs/latest.md for changes (SHA-256 dedup)
+    Triggers X3 automatically when brief changes
+    Pauses when approvals/PENDING_APPROVAL.md exists
+    Writes  state/auto-exchange-status.json after each cycle
 
 Public API:
     review_brief(brief_path, command_path, history_dir, config,
                  env=None, planner="openai") -> dict
+    watch_briefs(brief_path, command_path, history_dir, approvals_dir,
+                 state_dir, config, env=None, planner="openai",
+                 interval=5, max_cycles=None) -> dict
 
 Result dict keys:
     ok           bool   True if command file written
@@ -26,10 +36,12 @@ Security rules (same as openai_planner.py):
     - Generated command is NEVER executed.
 """
 
+import hashlib
 import json
 import os
 import re
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -323,7 +335,9 @@ def review_brief(
         return result
 
     # --- 2. Generate command text ---
-    ts = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    _now         = datetime.now()
+    ts           = _now.strftime("%Y-%m-%dT%H:%M:%S")
+    ts_file      = _now.strftime("%Y-%m-%dT%H-%M-%S-%f")  # microseconds for unique archive names
     command_text = ""
     tokens_used  = 0
 
@@ -405,7 +419,6 @@ def review_brief(
 
     # Archive first (fail-safe: archive before overwriting latest)
     history_dir.mkdir(parents=True, exist_ok=True)
-    ts_file      = ts.replace(":", "-")
     archive_name = f"{ts_file}-command.md"
     archive_path = history_dir / archive_name
 
@@ -430,6 +443,220 @@ def review_brief(
 
 
 # ---------------------------------------------------------------------------
+# X4: Watch loop
+# ---------------------------------------------------------------------------
+
+def _sha256_file(path: Path) -> str:
+    """Return hex SHA-256 of file contents, or '' if unreadable."""
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
+def _write_status(
+    status_path: Path,
+    watcher_state: str,
+    planner: str,
+    interval: int,
+    cycles: int,
+    commands_generated: int,
+    duplicate_skips: int,
+    approval_pauses: int,
+    last_brief_hash: str,
+    last_command_path: str,
+) -> None:
+    """Write lightweight status JSON — failure is non-fatal."""
+    try:
+        status_path.parent.mkdir(parents=True, exist_ok=True)
+        data = {
+            "timestamp":         datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+            "watcher_state":     watcher_state,
+            "planner":           planner,
+            "interval":          interval,
+            "cycles_completed":  cycles,
+            "commands_generated": commands_generated,
+            "duplicate_skips":   duplicate_skips,
+            "approval_pauses":   approval_pauses,
+            "last_brief_hash":   last_brief_hash[:16] + "…" if last_brief_hash else "",
+            "last_command_path": last_command_path,
+        }
+        status_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def watch_briefs(
+    brief_path: "str | Path",
+    command_path: "str | Path",
+    history_dir: "str | Path",
+    approvals_dir: "str | Path",
+    state_dir: "str | Path",
+    config: dict,
+    env: "dict | None" = None,
+    planner: str = "openai",
+    interval: int = 5,
+    max_cycles: "int | None" = None,
+    _sleep_fn=None,
+    _print_fn=None,
+) -> dict:
+    """
+    X4 watch loop: poll brief_path, run X3 on change, pause on pending approval.
+
+    Parameters
+    ----------
+    brief_path     : File to watch (outbox/chatgpt-briefs/latest.md)
+    command_path   : Where to write generated command (inbox/chatgpt-commands/latest.md)
+    history_dir    : Archive directory for generated commands
+    approvals_dir  : Directory containing PENDING_APPROVAL.md when paused
+    state_dir      : Directory to write auto-exchange-status.json
+    config         : Loaded bridge.config.json dict
+    env            : Optional env dict for testing (defaults to os.environ)
+    planner        : "openai" or "local"
+    interval       : Poll interval in seconds (0 = no sleep, for testing)
+    max_cycles     : Exit after this many cycles (None = run forever)
+    _sleep_fn      : Injectable sleep for testing (defaults to time.sleep)
+    _print_fn      : Injectable print for testing (defaults to builtins.print)
+
+    Returns
+    -------
+    dict with keys: cycles, commands_generated, duplicate_skips, approval_pauses
+    """
+    if env is None:
+        env = os.environ
+    if _sleep_fn is None:
+        _sleep_fn = time.sleep
+    if _print_fn is None:
+        _print_fn = print
+
+    brief_path    = Path(brief_path)
+    command_path  = Path(command_path)
+    history_dir   = Path(history_dir)
+    approvals_dir = Path(approvals_dir)
+    state_dir     = Path(state_dir)
+    status_path   = state_dir / "auto-exchange-status.json"
+    pending_path  = approvals_dir / "PENDING_APPROVAL.md"
+
+    counts = {
+        "cycles":             0,
+        "commands_generated": 0,
+        "duplicate_skips":    0,
+        "approval_pauses":    0,
+    }
+    last_brief_hash    = ""
+    last_command_path  = ""
+    was_paused         = False
+
+    _print_fn()
+    _print_fn("=== auto_exchange.py X4 watch ===")
+    _print_fn(f"Planner:    {planner}")
+    _print_fn(f"Watching:   {brief_path}")
+    _print_fn(f"Command:    {command_path}")
+    _print_fn(f"Archive:    {history_dir}")
+    _print_fn(f"Interval:   {interval}s")
+    _print_fn(f"Max cycles: {max_cycles if max_cycles is not None else 'unlimited'}")
+    _print_fn()
+
+    while max_cycles is None or counts["cycles"] < max_cycles:
+        counts["cycles"] += 1
+
+        # --- Check pending approval ---
+        if pending_path.exists():
+            counts["approval_pauses"] += 1
+            if not was_paused:
+                _print_fn(f"[cycle {counts['cycles']}] PAUSED — PENDING_APPROVAL.md exists. Waiting.")
+                was_paused = True
+            _write_status(
+                status_path, "paused_approval", planner, interval,
+                counts["cycles"], counts["commands_generated"],
+                counts["duplicate_skips"], counts["approval_pauses"],
+                last_brief_hash, last_command_path,
+            )
+            if interval > 0:
+                _sleep_fn(interval)
+            continue
+
+        if was_paused:
+            _print_fn(f"[cycle {counts['cycles']}] RESUMED — PENDING_APPROVAL.md cleared.")
+            was_paused = False
+
+        # --- Check brief exists ---
+        if not brief_path.exists():
+            _print_fn(f"[cycle {counts['cycles']}] WAITING — brief not found: {brief_path}")
+            _write_status(
+                status_path, "waiting_for_brief", planner, interval,
+                counts["cycles"], counts["commands_generated"],
+                counts["duplicate_skips"], counts["approval_pauses"],
+                last_brief_hash, last_command_path,
+            )
+            if interval > 0:
+                _sleep_fn(interval)
+            continue
+
+        # --- Hash check (dedup) ---
+        current_hash = _sha256_file(brief_path)
+        if current_hash and current_hash == last_brief_hash:
+            counts["duplicate_skips"] += 1
+            _print_fn(f"[cycle {counts['cycles']}] DUPLICATE_SKIP — brief unchanged.")
+            _write_status(
+                status_path, "running", planner, interval,
+                counts["cycles"], counts["commands_generated"],
+                counts["duplicate_skips"], counts["approval_pauses"],
+                last_brief_hash, last_command_path,
+            )
+            if interval > 0:
+                _sleep_fn(interval)
+            continue
+
+        # --- Brief changed — run X3 ---
+        last_brief_hash = current_hash
+        _print_fn(f"[cycle {counts['cycles']}] BRIEF_CHANGED — running X3 ({planner}).")
+
+        result = review_brief(
+            brief_path=brief_path,
+            command_path=command_path,
+            history_dir=history_dir,
+            config=config,
+            env=env,
+            planner=planner,
+        )
+
+        if result["blocked"]:
+            _print_fn(f"[cycle {counts['cycles']}] BLOCKED: {result['block_reason']}")
+            _print_fn(f"[cycle {counts['cycles']}] PENDING_APPROVAL.md written.")
+        elif result["ok"]:
+            counts["commands_generated"] += 1
+            last_command_path = result["command_path"]
+            _print_fn(f"[cycle {counts['cycles']}] COMMAND_WRITTEN: {result['command_path']}")
+            if result["tokens_used"]:
+                _print_fn(f"[cycle {counts['cycles']}] Tokens used: {result['tokens_used']}")
+        else:
+            _print_fn(f"[cycle {counts['cycles']}] ERROR: {result['error']}")
+
+        _write_status(
+            status_path, "running", planner, interval,
+            counts["cycles"], counts["commands_generated"],
+            counts["duplicate_skips"], counts["approval_pauses"],
+            last_brief_hash, last_command_path,
+        )
+
+        if interval > 0:
+            _sleep_fn(interval)
+
+    _print_fn()
+    _print_fn(f"Watch loop complete — {counts['cycles']} cycles, "
+              f"{counts['commands_generated']} commands, "
+              f"{counts['duplicate_skips']} skips.")
+    _write_status(
+        status_path, "done", planner, interval,
+        counts["cycles"], counts["commands_generated"],
+        counts["duplicate_skips"], counts["approval_pauses"],
+        last_brief_hash, last_command_path,
+    )
+    return counts
+
+
+# ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
 
@@ -446,7 +673,25 @@ def _load_config() -> dict:
 def main(argv: "list[str] | None" = None) -> int:
     import argparse
     parser = argparse.ArgumentParser(
-        description="X3 Auto-Exchange: Claude brief -> OpenAI review -> command file."
+        description="Auto-Exchange X3/X4: Claude brief -> OpenAI review -> command file."
+    )
+    parser.add_argument(
+        "--watch",
+        action="store_true",
+        help="X4: watch brief file and trigger X3 on change (poll loop)",
+    )
+    parser.add_argument(
+        "--interval",
+        type=int,
+        default=5,
+        help="X4: poll interval in seconds (0 = no sleep, for testing; default: 5)",
+    )
+    parser.add_argument(
+        "--max-cycles",
+        type=int,
+        default=None,
+        dest="max_cycles",
+        help="X4: exit after N watch cycles (smoke-test/CI mode)",
     )
     parser.add_argument(
         "--input-brief",
@@ -464,6 +709,16 @@ def main(argv: "list[str] | None" = None) -> int:
         help="Directory for archive copies (default: state/chatgpt-command-history)",
     )
     parser.add_argument(
+        "--approvals-dir",
+        default="approvals",
+        help="Directory containing PENDING_APPROVAL.md (default: approvals)",
+    )
+    parser.add_argument(
+        "--state-dir",
+        default="state",
+        help="Directory for status file (default: state)",
+    )
+    parser.add_argument(
         "--local-only",
         action="store_true",
         help="Use local fallback planner instead of OpenAI API",
@@ -472,18 +727,37 @@ def main(argv: "list[str] | None" = None) -> int:
 
     planner = "local" if args.local_only else "openai"
 
-    brief_path   = Path(args.input_brief)
-    command_path = Path(args.output_command)
-    history_dir  = Path(args.history_dir)
-    if not brief_path.is_absolute():
-        brief_path = _BASE / brief_path
-    if not command_path.is_absolute():
-        command_path = _BASE / command_path
-    if not history_dir.is_absolute():
-        history_dir = _BASE / history_dir
+    def _abs(p: str) -> Path:
+        pp = Path(p)
+        return pp if pp.is_absolute() else _BASE / pp
+
+    brief_path    = _abs(args.input_brief)
+    command_path  = _abs(args.output_command)
+    history_dir   = _abs(args.history_dir)
+    approvals_dir = _abs(args.approvals_dir)
+    state_dir     = _abs(args.state_dir)
 
     config = _load_config()
 
+    # --- X4: watch mode ---
+    if args.watch:
+        try:
+            watch_briefs(
+                brief_path=brief_path,
+                command_path=command_path,
+                history_dir=history_dir,
+                approvals_dir=approvals_dir,
+                state_dir=state_dir,
+                config=config,
+                planner=planner,
+                interval=args.interval,
+                max_cycles=args.max_cycles,
+            )
+        except KeyboardInterrupt:
+            print("\nWatch loop interrupted by user.")
+        return 0
+
+    # --- X3: single-shot mode ---
     print()
     print("=== auto_exchange.py X3 ===")
     print(f"Planner:  {planner}")
