@@ -589,8 +589,14 @@ def run_watch(
     planner: str = "local",
     config: "dict | None" = None,
     runner: str = "dry-run",
-) -> None:
-    """Poll inbox in a loop. Ctrl+C to stop."""
+    max_cycles: "int | None" = None,
+) -> int:
+    """Poll inbox in a loop. Ctrl+C to stop. Returns number of cycles completed.
+
+    max_cycles: stop after this many poll cycles (used in tests; None = run forever).
+    Pauses report processing when approvals/PENDING_APPROVAL.md exists, logging
+    once on first detection and again when cleared.
+    """
     if config is None:
         config = {}
     write_pid()
@@ -600,14 +606,43 @@ def run_watch(
     logger.info(f"Planner:  {planner}")
     logger.info(f"Runner:   {runner}")
     logger.info(f"Interval: {interval}s  |  Press Ctrl+C to stop")
+    if max_cycles is not None:
+        logger.info(f"Max cycles: {max_cycles} (test/smoke mode)")
 
     hashes = load_hashes()
+    cycle = 0
+    _approval_paused = False  # track state change to avoid log spam
+
     try:
         while True:
-            files = scan_inbox(logger)
-            for f in files:
-                process_report(f, hashes, logger, planner=planner, config=config, runner=runner)
+            cycle += 1
+            pending = APPROVAL_DIR / "PENDING_APPROVAL.md"
+
+            if pending.exists():
+                if not _approval_paused:
+                    logger.warning(
+                        "WATCH_PAUSED: approvals/PENDING_APPROVAL.md exists. "
+                        "Report processing suspended until resolved. "
+                        "Approve or reject, then archive the file."
+                    )
+                    set_status("waiting_approval", "Paused -- PENDING_APPROVAL.md exists")
+                    _approval_paused = True
+            else:
+                if _approval_paused:
+                    logger.info("WATCH_RESUMED: PENDING_APPROVAL.md cleared. Resuming report processing.")
+                    set_status("idle", f"Resumed watch mode [{planner}/{runner}]")
+                    _approval_paused = False
+
+                files = scan_inbox(logger)
+                for f in files:
+                    process_report(f, hashes, logger, planner=planner, config=config, runner=runner)
+
+            if max_cycles is not None and cycle >= max_cycles:
+                logger.info(f"Watch mode: max_cycles={max_cycles} reached, exiting.")
+                break
+
             time.sleep(interval)
+
     except KeyboardInterrupt:
         logger.info("Bridge stopped by user (Ctrl+C)")
         set_status("idle", "Stopped by user")
@@ -617,6 +652,8 @@ def run_watch(
                 PID_FILE.unlink()
             except OSError:
                 pass
+
+    return cycle
 
 
 # ---------------------------------------------------------------------------
