@@ -21,6 +21,10 @@
       "max_output_tokens": 2048
     }
   },
+  "execution_audit": {
+    "enabled": true,
+    "path": "state/execution-audit.log.jsonl"
+  },
   "execution_scope": {
     "allowed_path_prefixes": [
       "docs/",

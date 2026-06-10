@@ -22,6 +22,12 @@ Gate evaluation order (short-circuits on first failure):
                                execution scope allowlist (Phase D D2).
                                Execute path only; dry-run never evaluates it.
 
+Phase D D3: every execute-path decision (gate block, gates passed, claude
+invocation outcome) is appended as one JSON line to an append-only audit log
+(config key "execution_audit", default state/execution-audit.log.jsonl).
+If the pre-invocation audit write fails, execution is blocked (fail closed).
+Dry-run mode never writes audit events.
+
 Python 3.8+ standard library only.  No external dependencies.
 """
 
@@ -47,6 +53,7 @@ GATE_RATE_LIMIT      = "RATE_LIMIT_GATE"
 GATE_LOOP            = "LOOP_DETECTION"
 GATE_EXECUTE_ENABLED = "EXECUTE_ENABLED_GATE"
 GATE_SCOPE_CONSTRAINTS = "SCOPE_CONSTRAINTS_GATE"
+GATE_AUDIT           = "EXECUTION_AUDIT_GATE"
 
 _DOCS_ONLY_PATTERNS = (
     "documentation only", "readme update", "spec update",
@@ -388,6 +395,99 @@ def _gate_scope_constraints(task_text: str, config: dict) -> "tuple[bool, str]":
 
 
 # ---------------------------------------------------------------------------
+# Phase D D3: execution audit log
+# ---------------------------------------------------------------------------
+
+_DEFAULT_AUDIT_PATH = "state/execution-audit.log.jsonl"
+
+
+def _build_execution_audit_event(
+    event_type: str,
+    mode: str,
+    decision: dict,
+    gate: str,
+    gate_result: str,
+    reason: str,
+    would_run: bool,
+    ran: bool,
+    returncode: "int | None" = None,
+    task_id: "str | None" = None,
+    config: "dict | None" = None,
+    env: "dict | None" = None,
+    invoked: bool = False,
+) -> dict:
+    """Build one audit event dict (Phase D D3).
+
+    Contains booleans and gate metadata only -- never env var values, secrets,
+    API keys, or task/command body content.
+
+    Safety invariants are explicit and conservative:
+      generated_command_executed -- hardcoded False (no such path exists)
+      x6_enabled                 -- hardcoded False (X6 is not implemented)
+      real_claude_execution      -- True only when _invoke_claude() was called
+    """
+    if config is None:
+        config = {}
+    if env is None:
+        env = os.environ
+    raw = env.get("BRIDGE_EXECUTE_ENABLED")
+    return {
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "event_type":    event_type,
+        "mode":          mode,
+        "runner":        mode,   # --runner CLI value maps 1:1 onto mode
+        "task_id":       task_id if task_id else None,
+        "decision":      decision.get("decision", "unknown")
+                         if isinstance(decision, dict) else "unknown",
+        "gate":          gate,
+        "gate_result":   gate_result,
+        "reason":        reason,
+        "would_run":     bool(would_run),
+        "ran":           bool(ran),
+        "returncode":    returncode,
+        "scope_gate_enabled":          isinstance(config.get("execution_scope"), dict),
+        "execute_enabled_env_present": raw is not None,
+        "execute_enabled_env_exact":   raw == "1",
+        "generated_command_executed":  False,
+        "real_claude_execution":       bool(invoked),
+        "x6_enabled":                  False,
+    }
+
+
+def _append_execution_audit_log(
+    event: dict,
+    config: dict,
+    base_dir: "Path | None" = None,
+) -> "tuple[bool, str]":
+    """Append one JSONL audit event.  Returns (ok, reason).
+
+    Append-only: the file is opened in mode "a" and never truncated.  Only
+    the audit log's own parent directory is created.  When
+    execution_audit.enabled is false the event is skipped (ok=True).  When
+    the execution_audit config is missing, auditing defaults to enabled at
+    _DEFAULT_AUDIT_PATH (safe default for the execute path).
+    """
+    audit_cfg = config.get("execution_audit")
+    if not isinstance(audit_cfg, dict):
+        audit_cfg = {}
+    if not audit_cfg.get("enabled", True):
+        return True, "audit disabled by config (event skipped)"
+
+    path = Path(audit_cfg.get("path") or _DEFAULT_AUDIT_PATH)
+    if not path.is_absolute():
+        path = Path(base_dir or Path.cwd()) / path
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(event, ensure_ascii=False)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+        return True, f"audit event appended: {event.get('event_type', '')}"
+    except (OSError, TypeError, ValueError) as exc:
+        return False, f"audit log write failed: {exc}"
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -528,6 +628,31 @@ def check_and_run(
         logger.info("Runner: add --runner execute (Phase D) to enable real invocation.")
         return result
 
+    # --- Phase D D3: execute-path audit helper ---
+    # Builds and appends one audit event.  Booleans and gate metadata only;
+    # never env values, secrets, or task/command body content.
+    def _audit(event_type, gate, gate_result, reason,
+               ran=False, returncode=None, invoked=False):
+        event = _build_execution_audit_event(
+            event_type=event_type,
+            mode=mode,
+            decision=decision,
+            gate=gate,
+            gate_result=gate_result,
+            reason=reason,
+            would_run=result["would_run"],
+            ran=ran,
+            returncode=returncode,
+            task_id=report_hash[:16] if report_hash else None,
+            config=config,
+            env=env,
+            invoked=invoked,
+        )
+        ok_a, msg_a = _append_execution_audit_log(event, config, base_dir=base_dir)
+        if not ok_a:
+            logger.error(f"Runner: {msg_a}")
+        return ok_a, msg_a
+
     # --- Gate 7: Execute-enabled gate (Phase D) ---
     # Both signals must be present: --runner execute (mode) AND
     # BRIDGE_EXECUTE_ENABLED=1 (env var).  Missing either signal is a safe
@@ -537,6 +662,7 @@ def check_and_run(
         logger.info(f"  [INFO ] {GATE_EXECUTE_ENABLED}: {msg7}")
         result["gate_triggered"] = GATE_EXECUTE_ENABLED
         result["checks_failed"].append({"gate": GATE_EXECUTE_ENABLED, "reason": msg7})
+        _audit("gate_blocked", GATE_EXECUTE_ENABLED, "blocked", msg7)
         return result
     _log_gate(logger, GATE_EXECUTE_ENABLED, True, msg7)
     result["checks_passed"].append(GATE_EXECUTE_ENABLED)
@@ -549,13 +675,35 @@ def check_and_run(
     if not ok8:
         result["gate_triggered"] = GATE_SCOPE_CONSTRAINTS
         result["checks_failed"].append({"gate": GATE_SCOPE_CONSTRAINTS, "reason": msg8})
+        _audit("gate_blocked", GATE_SCOPE_CONSTRAINTS, "blocked", msg8)
         return result
     result["checks_passed"].append(GATE_SCOPE_CONSTRAINTS)
+
+    # --- Phase D D3: pre-invocation audit record (fail closed) ---
+    # Never execute without a durable audit record of the gate-stack pass.
+    ok_audit, audit_msg = _audit("gates_passed", "none", "passed",
+                                 "all execute-path gates passed")
+    if not ok_audit:
+        logger.error("Runner: audit log write failed -- blocking execution (fail closed)")
+        result["gate_triggered"] = GATE_AUDIT
+        result["checks_failed"].append({"gate": GATE_AUDIT, "reason": audit_msg})
+        return result
 
     # --- Execute mode (Phase D) ---
     logger.info("Runner [EXECUTE]: all gates passed. Invoking Claude Code...")
     ran = _invoke_claude(task_path, config, logger)
     result["ran"] = ran
+    ok_audit, audit_msg = _audit(
+        "claude_invocation", "none", "passed",
+        "claude exited cleanly" if ran else
+        "claude invocation failed (non-zero exit, timeout, or binary not found)",
+        ran=ran,
+        returncode=0 if ran else 1,
+        invoked=True,
+    )
+    if not ok_audit:
+        # Execution already happened; surface the audit failure, never hide it.
+        result["audit_log_error"] = audit_msg
     return result
 
 
