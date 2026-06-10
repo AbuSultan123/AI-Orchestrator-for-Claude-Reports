@@ -43,6 +43,7 @@ ORCH_PY   = BASE_DIR / "orchestrator.py"
 
 INBOX_DIR    = BASE_DIR / "inbox"  / "reports"
 OUTBOX_DIR   = BASE_DIR / "outbox" / "tasks"
+EXEC_REPORTS_DIR = BASE_DIR / "outbox" / "execution-reports"
 APPROVAL_DIR = BASE_DIR / "approvals"
 LOGS_DIR     = BASE_DIR / "logs"
 STATE_DIR    = BASE_DIR / "state"
@@ -244,6 +245,144 @@ def build_execute_summary(runner_result: dict) -> "dict | None":
     if audit_err:
         summary["audit_log_error"] = str(audit_err)[:300]
     return summary
+
+
+# ---------------------------------------------------------------------------
+# Phase D D6-B: post-run block escalation
+# ---------------------------------------------------------------------------
+
+# Execute-path safety blocks (D3 fail-closed, D4, D5) that require human
+# escalation via the existing pending-approval pause mechanism.
+_POST_RUN_BLOCK_GATES = (
+    "POST_RUN_DIFF_GATE",
+    "TEST_REQUIREMENT_GATE",
+    "EXECUTION_AUDIT_GATE",
+)
+
+
+def _gate_block_reason(runner_result: dict) -> str:
+    """Short reason recorded for the triggered gate (truncated, summary only)."""
+    gate = runner_result.get("gate_triggered", "")
+    for entry in runner_result.get("checks_failed", []):
+        if entry.get("gate") == gate:
+            return str(entry.get("reason", ""))[:300]
+    return "(no reason recorded)"
+
+
+def _build_escalation_markdown(
+    ts_prefix: str,
+    rel_report,
+    runner_result: dict,
+    execute_summary: "dict | None",
+) -> str:
+    """Markdown body for PENDING_APPROVAL.md and the execution-report archive.
+
+    Summary fields only: classifications, booleans, truncated reasons.  Never
+    diff bodies, command bodies, test output, env values, or secrets.
+    """
+    gate    = runner_result.get("gate_triggered", "unknown")
+    ran     = bool(runner_result.get("ran"))
+    summary = execute_summary or {}
+    lines = [
+        "# Approval Required -- Post-Run Execution Block",
+        "",
+        f"**Timestamp:** {ts_prefix}",
+        f"**Report:** {rel_report}",
+        f"**Gate triggered:** {gate}",
+        f"**Reason:** {_gate_block_reason(runner_result)}",
+        f"**Runner/mode:** {runner_result.get('mode', 'unknown')}",
+        f"**would_run:** {bool(runner_result.get('would_run'))}",
+        f"**ran:** {ran}",
+        f"**Returncode (derived):** {0 if ran else 1}",
+        "",
+        "## Post-run diff summary",
+    ]
+    prd = summary.get("post_run_diff")
+    if prd:
+        lines.append(f"- classification: {prd.get('classification', '')}")
+        lines.append(f"- safe: {prd.get('safe', False)}")
+    else:
+        lines.append("- not available")
+    lines.append("")
+    lines.append("## Test requirements summary")
+    tr = summary.get("test_requirements")
+    if tr:
+        lines.append(f"- classification: {tr.get('classification', '')}")
+        lines.append(f"- tests_required: {tr.get('tests_required', False)}")
+        lines.append(f"- determinable: {tr.get('determinable', True)}")
+        lines.append(f"- passed: {tr.get('passed', False)}")
+    else:
+        lines.append("- not available")
+    lines.append("")
+    if summary.get("audit_log_error"):
+        lines.append("## Audit log error")
+        lines.append(f"- {summary['audit_log_error']}")
+        lines.append("")
+    lines += [
+        "---",
+        "",
+        "## Instructions",
+        "",
+        "Human review is REQUIRED before any further bridge activity.",
+        "Generated commands were NOT automatically approved or re-executed.",
+        "This execution result is treated as UNSAFE until a human reviews it.",
+        "",
+        "To approve:  Create `approvals/APPROVED.flag`",
+        "To reject:   Create `approvals/REJECTED.flag`",
+        "",
+        "PowerShell:",
+        "  New-Item approvals\\APPROVED.flag -ItemType File",
+        "  # or",
+        "  New-Item approvals\\REJECTED.flag -ItemType File",
+    ]
+    return "\n".join(lines)
+
+
+def escalate_post_run_block(
+    report_path: Path,
+    runner_result: dict,
+    execute_summary: "dict | None",
+    ts_prefix: str,
+    logger: logging.Logger,
+) -> dict:
+    """Escalate an execute-path post-run safety block (Phase D D6-B).
+
+    Writes approvals/PENDING_APPROVAL.md -- the existing watch-loop pause
+    mechanism picks it up; no new pause flag is introduced -- and archives a
+    summary-only execution report under outbox/execution-reports/.
+
+    Returns an escalation summary dict for state/bridge-status.json.
+    """
+    try:
+        rel_report = report_path.relative_to(BASE_DIR)
+    except ValueError:
+        rel_report = report_path
+    content = _build_escalation_markdown(
+        ts_prefix, rel_report, runner_result, execute_summary)
+
+    APPROVAL_DIR.mkdir(parents=True, exist_ok=True)
+    pending = APPROVAL_DIR / "PENDING_APPROVAL.md"
+    pending.write_text(content, encoding="utf-8")
+
+    EXEC_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    archive = EXEC_REPORTS_DIR / f"{ts_prefix}-execution-blocked.md"
+    archive.write_text(content, encoding="utf-8")
+
+    gate = runner_result.get("gate_triggered", "unknown")
+    try:
+        rel_archive = archive.relative_to(BASE_DIR)
+    except ValueError:
+        rel_archive = archive
+    logger.warning(
+        f"POST_RUN_BLOCK_ESCALATED: gate={gate} -- PENDING_APPROVAL.md written; "
+        f"execution report archived: {rel_archive}"
+    )
+    return {
+        "escalated":        True,
+        "gate":             gate,
+        "pending_approval": str(pending),
+        "execution_report": str(archive),
+    }
 
 
 def _format_execute_summary(summary: dict) -> str:
@@ -613,6 +752,14 @@ def process_report(
         execute_summary = build_execute_summary(runner_result)
         if execute_summary:
             logger.info("Runner execute summary: " + _format_execute_summary(execute_summary))
+        # Phase D D6-B: escalate execute-path post-run safety blocks to the
+        # existing pending-approval pause mechanism.  Never fires for dry-run
+        # (dry-run results cannot carry these gates) or for Gate 7 fallback.
+        if runner == "execute" and runner_result.get("gate_triggered") in _POST_RUN_BLOCK_GATES:
+            escalation = escalate_post_run_block(
+                report_path, runner_result, execute_summary, ts, logger)
+            execute_summary = dict(execute_summary or {})
+            execute_summary["escalation"] = escalation
 
     # --- Record hash ---
     hashes[h] = {
