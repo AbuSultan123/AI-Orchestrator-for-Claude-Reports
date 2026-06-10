@@ -23,6 +23,7 @@ Python 3.8+ standard library only.  No external dependencies.
 
 import json
 import logging
+import os
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -39,6 +40,7 @@ GATE_PENDING_APPROVAL= "PENDING_APPROVAL_GATE"
 GATE_GIT_SAFETY      = "GIT_SAFETY_GATE"
 GATE_RATE_LIMIT      = "RATE_LIMIT_GATE"
 GATE_LOOP            = "LOOP_DETECTION"
+GATE_EXECUTE_ENABLED = "EXECUTE_ENABLED_GATE"
 
 _DOCS_ONLY_PATTERNS = (
     "documentation only", "readme update", "spec update",
@@ -213,6 +215,41 @@ def _gate_loop(
     return True, "No recent loop detected", False
 
 
+def _gate_execute_enabled(
+    mode: str,
+    env: "dict | None" = None,
+) -> "tuple[bool, str]":
+    """Gate 7: both execution signals must be present simultaneously.
+
+    Requires:
+      1. mode == "execute"              (CLI flag --runner execute)
+      2. BRIDGE_EXECUTE_ENABLED == "1"  (exact string, environment variable)
+
+    Rejected values for BRIDGE_EXECUTE_ENABLED: missing, "", "0", "true",
+    "yes", " 1 " (padded), "1 " (trailing space), " 1" (leading space), or
+    any other value that is not the exact ASCII character sequence "1".
+
+    Failure semantics: safe dry-run fallback.  No subprocess.  No exception.
+    The caller logs at INFO level (not WARNING) to signal expected state.
+    """
+    if env is None:
+        env = os.environ
+    if mode != "execute":
+        return False, "mode is not 'execute' — dry-run path (Gate 7 not applicable)"
+    val = env.get("BRIDGE_EXECUTE_ENABLED", "")
+    if val == "1":
+        return True, "both signals present (mode=execute, BRIDGE_EXECUTE_ENABLED=1)"
+    if val:
+        return False, (
+            f"BRIDGE_EXECUTE_ENABLED={val!r} is not exactly '1'. "
+            "Falling back to dry-run."
+        )
+    return False, (
+        "BRIDGE_EXECUTE_ENABLED is not set. "
+        "Falling back to dry-run."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
@@ -227,6 +264,7 @@ def check_and_run(
     hashes: "dict | None" = None,
     report_hash: str = "",
     logger: "logging.Logger | None" = None,
+    env: "dict | None" = None,
 ) -> dict:
     """
     Run all pre-execution gates and (in execute mode) invoke Claude Code.
@@ -242,6 +280,7 @@ def check_and_run(
     hashes        : processed-hashes.json dict (for rate limit + loop detection)
     report_hash   : SHA-256 of the current report (for loop detection)
     logger        : bridge logger instance
+    env           : environment mapping for Gate 7 (None = os.environ)
 
     Returns
     -------
@@ -351,6 +390,19 @@ def check_and_run(
         )
         logger.info("Runner: add --runner execute (Phase D) to enable real invocation.")
         return result
+
+    # --- Gate 7: Execute-enabled gate (Phase D) ---
+    # Both signals must be present: --runner execute (mode) AND
+    # BRIDGE_EXECUTE_ENABLED=1 (env var).  Missing either signal is a safe
+    # fallback: would_run stays True, ran stays False, logged at INFO.
+    ok7, msg7 = _gate_execute_enabled(mode, env=env)
+    if not ok7:
+        logger.info(f"  [INFO ] {GATE_EXECUTE_ENABLED}: {msg7}")
+        result["gate_triggered"] = GATE_EXECUTE_ENABLED
+        result["checks_failed"].append({"gate": GATE_EXECUTE_ENABLED, "reason": msg7})
+        return result
+    _log_gate(logger, GATE_EXECUTE_ENABLED, True, msg7)
+    result["checks_passed"].append(GATE_EXECUTE_ENABLED)
 
     # --- Execute mode (Phase D) ---
     logger.info("Runner [EXECUTE]: all gates passed. Invoking Claude Code...")
