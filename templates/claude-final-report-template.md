@@ -18,6 +18,34 @@
   Remove these HTML comment blocks before saving.
 -->
 
+<!--
+  KEYWORD WARNING — READ BEFORE WRITING
+  ──────────────────────────────────────
+  The bridge risk classifier uses SUBSTRING matching. It cannot tell the
+  difference between "I made dependency changes" and "No dependency changes."
+  Both trigger approval_required.
+
+  AVOID these phrases even as negations:
+    ✗  "no dependency changes"      → still matches "dependency change"
+    ✗  "no schema changes"          → still matches "schema chang"
+    ✗  "no src/ changes"            → still matches "src/"
+    ✗  "no migration"               → still matches "migrat"
+    ✗  "no git commit needed"       → still matches "git commit"
+    ✗  "no npm install required"    → still matches "npm install"
+
+  USE neutral wording instead:
+    ✓  "Scope remained documentation-only."
+    ✓  "No elevated-risk areas were touched."
+    ✓  "Runtime-only outputs were produced."
+    ✓  "No implementation-risk sections were included."
+    ✓  "Only markdown files were affected."
+    ✓  "All changes were confined to docs/ and templates/."
+
+  If your task genuinely involves source changes, commits, or package updates,
+  describe them directly (e.g. "Updated src/main.py") — those will correctly
+  produce approval_required, which is the intended behavior.
+-->
+
 ## Project
 <!-- e.g. TradingView Light v5 Lab -->
 

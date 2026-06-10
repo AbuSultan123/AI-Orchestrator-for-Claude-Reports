@@ -135,6 +135,46 @@ how to archive the package, and the risk-level reference table.
 
 ---
 
+## Risk classifier and keyword matching
+
+The bridge classifies each report via substring scanning. It cannot parse
+negation — it sees text, not intent.
+
+**A phrase like "No dependency changes" still matches the pattern
+`dependency change` and produces `approval_required`.**
+
+The full list of patterns that trigger `approval_required` includes:
+
+| Trigger phrase/pattern | Example that triggers it |
+|------------------------|--------------------------|
+| `dependency change` | "No dependency changes" |
+| `schema chang` | "No schema changes were made" |
+| `src/` path | "No src/ files were touched" |
+| `migrat` | "No migration needed" |
+| `git commit` | "No git commit was made" |
+| `npm install` | "No npm install required" |
+| `package.json` | "package.json was not modified" |
+
+**Rule:** Do not mention gated keywords at all — even to deny them.
+Use neutral wording that simply doesn't contain the substring.
+
+### Neutral wording reference
+
+| Instead of... | Write... |
+|---------------|----------|
+| "No dependency changes" | "Scope remained documentation-only." |
+| "No schema changes" | "No elevated-risk areas were touched." |
+| "No src/ changes" | "All changes were confined to docs/ and templates/." |
+| "No migration" | "Runtime-only outputs were produced." |
+| "No git commit needed" | "No implementation-risk sections were included." |
+| "No npm install required" | "Only markdown files were affected." |
+
+For tasks that genuinely involve source changes, commits, or package updates,
+name them directly (e.g. "Updated `src/main.py`"). The classifier will
+correctly produce `approval_required`, which is the intended behavior.
+
+---
+
 ## What this workflow does NOT do
 
 - Does not invoke Claude Code automatically

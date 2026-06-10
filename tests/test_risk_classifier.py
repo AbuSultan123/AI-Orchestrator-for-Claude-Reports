@@ -60,6 +60,42 @@ def test_schema_change_approval_required():
     print(f"  PASS  schema change -> {d!r} (approval_required)")
 
 
+def test_neutral_docs_only_low_risk():
+    """Neutral documentation-only wording must classify as low_risk_auto_allowed.
+
+    Avoids all gated keywords (dependency, schema, src/, migration, git commit,
+    npm install, package.json) — uses neutral phrasing instead.
+    """
+    line = (
+        "Reviewed README.md and updated the introduction paragraph. "
+        "Scope remained documentation-only. "
+        "No elevated-risk areas were touched. "
+        "Only markdown files were affected."
+    )
+    d = _decision(line)
+    assert d == "low_risk_auto_allowed", (
+        f"Neutral docs-only report classified as {d!r}; expected low_risk_auto_allowed. "
+        "Check that the wording avoids all gated keywords."
+    )
+    print(f"  PASS  neutral docs-only -> {d!r} (low_risk_auto_allowed)")
+
+
+def test_actionable_dependency_change_approval_required():
+    """An actionable dependency update must still produce approval_required.
+
+    Confirms the classifier catches real package installs even after
+    the neutral-wording guidance is applied — neutral phrasing only
+    helps documentation tasks, not actual source changes.
+    """
+    line = (
+        "Added react-router to the project. "
+        "npm install was run to update node_modules."
+    )
+    d = _decision(line)
+    assert d == "approval_required", f"Expected approval_required, got {d!r}"
+    print(f"  PASS  actionable npm install -> {d!r} (approval_required)")
+
+
 if __name__ == "__main__":
     cases = [
         test_zero_errors_not_blocked,
@@ -67,6 +103,8 @@ if __name__ == "__main__":
         test_twelve_errors_blocked,
         test_negated_schema_change_not_unsafe,
         test_schema_change_approval_required,
+        test_neutral_docs_only_low_risk,
+        test_actionable_dependency_change_approval_required,
     ]
     failures = []
     print("Risk classifier smoke tests")
@@ -82,3 +120,4 @@ if __name__ == "__main__":
         print(f"FAILED: {len(failures)} test(s)")
         sys.exit(1)
     print(f"All {len(cases)} tests passed.")
+
