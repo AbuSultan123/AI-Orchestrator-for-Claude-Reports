@@ -537,6 +537,103 @@ def write_dashboard(
 
 
 # ---------------------------------------------------------------------------
+# X5.5: Command inbox reader / reviewer
+# ---------------------------------------------------------------------------
+
+# HTML comment field patterns in generated command files.
+_INBOX_HEADER_PATTERNS = {
+    "status_header":  re.compile(r"<!--\s*Status:\s*(.+?)-->", re.I),
+    "source_header":  re.compile(r"<!--\s*Source:\s*(.+?)-->", re.I),
+    "planner_header": re.compile(r"<!--\s*Planner:\s*(.+?)-->", re.I),
+    "warning_header": re.compile(r"<!--\s*WARNING:\s*(.+?)-->", re.I),
+}
+
+
+def read_inbox_command(
+    command_path: "str | Path",
+    approvals_dir: "str | Path",
+) -> dict:
+    """
+    Read and classify inbox/chatgpt-commands/latest.md without executing it.
+
+    Returns a dict with file metadata, parsed header fields, safety result,
+    and review_status string:
+        "READY_FOR_HUMAN_REVIEW"  — file is present and safe
+        "BLOCKED_FOR_REVIEW"      — forbidden patterns detected
+        "PENDING_APPROVAL_ACTIVE" — approvals/PENDING_APPROVAL.md exists
+        "MISSING_COMMAND"         — file does not exist
+
+    The command content is never executed.
+    No OpenAI API is called.
+    No Claude binary is invoked.
+    """
+    command_path  = Path(command_path)
+    approvals_dir = Path(approvals_dir)
+    pending_path  = approvals_dir / "PENDING_APPROVAL.md"
+
+    result: dict = {
+        "exists":           False,
+        "path":             str(command_path),
+        "modified_time":    "",
+        "title":            "",
+        "status_header":    "",
+        "source_header":    "",
+        "planner_header":   "",
+        "warning_header":   "",
+        "safe":             False,
+        "block_reason":     "",
+        "pending_approval": pending_path.exists(),
+        "review_status":    "MISSING_COMMAND",
+        "body":             "",
+    }
+
+    if not command_path.exists():
+        return result
+
+    result["exists"]        = True
+    result["modified_time"] = _file_mtime(command_path)
+
+    try:
+        raw = command_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        result["block_reason"]  = f"Cannot read file: {exc}"
+        result["review_status"] = "BLOCKED_FOR_REVIEW"
+        return result
+
+    # Parse HTML comment header fields
+    for key, rx in _INBOX_HEADER_PATTERNS.items():
+        m = rx.search(raw)
+        if m:
+            result[key] = m.group(1).strip()
+
+    # Extract first non-comment markdown heading as title
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("# ") and not stripped.startswith("<!--"):
+            result["title"] = stripped[2:].strip()
+            break
+
+    # Body = file content with HTML comment header lines stripped
+    body_lines = [ln for ln in raw.splitlines() if not ln.strip().startswith("<!--")]
+    result["body"] = "\n".join(body_lines).strip()
+
+    # Safety classification (never executes anything)
+    safe, reason = _check_safety(raw)
+    result["safe"]         = safe
+    result["block_reason"] = reason
+
+    # Determine review_status (pending approval takes precedence over safe/blocked)
+    if result["pending_approval"]:
+        result["review_status"] = "PENDING_APPROVAL_ACTIVE"
+    elif not safe:
+        result["review_status"] = "BLOCKED_FOR_REVIEW"
+    else:
+        result["review_status"] = "READY_FOR_HUMAN_REVIEW"
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # X4: Watch loop
 # ---------------------------------------------------------------------------
 
@@ -851,6 +948,12 @@ def main(argv: "list[str] | None" = None) -> int:
         action="store_true",
         help="Use local fallback planner instead of OpenAI API",
     )
+    parser.add_argument(
+        "--read-inbox",
+        action="store_true",
+        dest="read_inbox",
+        help="X5.5: read and classify inbox command file; output JSON; never execute",
+    )
     args = parser.parse_args(argv)
 
     planner = "local" if args.local_only else "openai"
@@ -866,6 +969,15 @@ def main(argv: "list[str] | None" = None) -> int:
     state_dir     = _abs(args.state_dir)
 
     config = _load_config()
+
+    # --- X5.5: read-inbox mode ---
+    if args.read_inbox:
+        inbox_result = read_inbox_command(
+            command_path=command_path,
+            approvals_dir=approvals_dir,
+        )
+        print(json.dumps(inbox_result, indent=2))
+        return 0
 
     # --- X4: watch mode ---
     if args.watch:
