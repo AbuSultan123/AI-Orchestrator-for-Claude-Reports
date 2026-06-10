@@ -25,6 +25,18 @@
     "enabled": true,
     "path": "state/execution-audit.log.jsonl"
   },
+  "post_run_diff": {
+    "enabled": true,
+    "allowed_path_prefixes": [
+      "docs/",
+      "tests/",
+      "scripts/"
+    ],
+    "allow_root_markdown": true,
+    "block_untracked_files": false,
+    "block_deleted_files": true,
+    "block_binary_files": true
+  },
   "execution_scope": {
     "allowed_path_prefixes": [
       "docs/",

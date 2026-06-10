@@ -21,6 +21,11 @@ Gate evaluation order (short-circuits on first failure):
     8. SCOPE_CONSTRAINTS_GATE -- task path references must be inside the
                                execution scope allowlist (Phase D D2).
                                Execute path only; dry-run never evaluates it.
+    9. POST_RUN_DIFF_GATE   -- post-run repository diff must be clean or
+                               within allowed paths (Phase D D4).  Runs only
+                               after _invoke_claude() returns in execute mode;
+                               read-only git capture; a block marks the run
+                               unsafe even when the invocation succeeded.
 
 Phase D D3: every execute-path decision (gate block, gates passed, claude
 invocation outcome) is appended as one JSON line to an append-only audit log
@@ -54,6 +59,7 @@ GATE_LOOP            = "LOOP_DETECTION"
 GATE_EXECUTE_ENABLED = "EXECUTE_ENABLED_GATE"
 GATE_SCOPE_CONSTRAINTS = "SCOPE_CONSTRAINTS_GATE"
 GATE_AUDIT           = "EXECUTION_AUDIT_GATE"
+GATE_POST_RUN_DIFF   = "POST_RUN_DIFF_GATE"
 
 _DOCS_ONLY_PATTERNS = (
     "documentation only", "readme update", "spec update",
@@ -415,6 +421,7 @@ def _build_execution_audit_event(
     config: "dict | None" = None,
     env: "dict | None" = None,
     invoked: bool = False,
+    post_run_diff: "dict | None" = None,
 ) -> dict:
     """Build one audit event dict (Phase D D3).
 
@@ -431,7 +438,7 @@ def _build_execution_audit_event(
     if env is None:
         env = os.environ
     raw = env.get("BRIDGE_EXECUTE_ENABLED")
-    return {
+    event = {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "event_type":    event_type,
         "mode":          mode,
@@ -452,6 +459,11 @@ def _build_execution_audit_event(
         "real_claude_execution":       bool(invoked),
         "x6_enabled":                  False,
     }
+    # Phase D D4: summary fields only (classification, counts, short reason) --
+    # never the full diff body or file contents.
+    if post_run_diff is not None:
+        event["post_run_diff"] = post_run_diff
+    return event
 
 
 def _append_execution_audit_log(
@@ -485,6 +497,232 @@ def _append_execution_audit_log(
         return True, f"audit event appended: {event.get('event_type', '')}"
     except (OSError, TypeError, ValueError) as exc:
         return False, f"audit log write failed: {exc}"
+
+
+# ---------------------------------------------------------------------------
+# Phase D D4: post-run diff review gate (Gate 9)
+# ---------------------------------------------------------------------------
+
+# File extensions treated as binary changes for Gate 9.
+_POST_RUN_BINARY_EXTS = (
+    ".png", ".jpg", ".jpeg", ".gif", ".ico", ".exe", ".dll", ".so",
+    ".pyd", ".pyc", ".zip", ".gz", ".7z", ".pdf", ".bin", ".dat",
+)
+
+# File name tokens that suggest a credential/secret file.
+_POST_RUN_SECRET_TOKENS = (
+    "id_rsa", ".pem", ".pfx", ".p12", ".netrc", ".npmrc",
+    "secrets.json", "credentials.json",
+)
+
+# Severity order for classification labels (higher wins).
+_POST_RUN_SEVERITY = {
+    "secrets_risk":           6,
+    "git_metadata_change":    5,
+    "binary_or_large_change": 4,
+    "deleted_file":           3,
+    "unexpected_path":        2,
+    "unclear":                1,
+}
+
+# Default Gate 9 config when "post_run_diff" is missing from bridge.config.json.
+_POST_RUN_DEFAULTS = {
+    "enabled": True,
+    "allowed_path_prefixes": ["docs/", "tests/", "scripts/"],
+    "allow_root_markdown": True,
+    "block_untracked_files": False,
+    "block_deleted_files": True,
+    "block_binary_files": True,
+}
+
+
+def _post_run_cfg(config: dict) -> dict:
+    cfg = config.get("post_run_diff")
+    if not isinstance(cfg, dict):
+        cfg = {}
+    merged = dict(_POST_RUN_DEFAULTS)
+    merged.update(cfg)
+    return merged
+
+
+def _capture_post_run_diff(base_dir: Path) -> dict:
+    """Capture the post-run repository state using READ-ONLY git commands only.
+
+    Commands: git status --short / git diff --name-status / git diff --stat.
+    Never runs mutating git commands (reset, clean, checkout, restore, add,
+    commit, push, tag).
+
+    Returns {"ok", "status_text", "diff_text", "error"}.  Any capture failure
+    returns ok=False so the caller can fail closed.
+    """
+    commands = (
+        ("status_text", ["git", "status", "--short"]),
+        ("name_status", ["git", "diff", "--name-status"]),
+        ("diff_stat",   ["git", "diff", "--stat"]),
+    )
+    out = {"ok": True, "status_text": "", "diff_text": "", "error": ""}
+    texts = {}
+    for key, cmd in commands:
+        try:
+            r = subprocess.run(
+                cmd, cwd=base_dir, capture_output=True, text=True, timeout=10,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+            out["ok"] = False
+            out["error"] = f"git capture failed: {exc}"
+            return out
+        if r.returncode != 0:
+            out["ok"] = False
+            out["error"] = f"'{' '.join(cmd)}' exited {r.returncode}"
+            return out
+        texts[key] = r.stdout or ""
+    out["status_text"] = texts["status_text"]
+    out["diff_text"] = texts["name_status"]
+    if texts["diff_stat"]:
+        out["diff_text"] += "\n" + texts["diff_stat"]
+    return out
+
+
+def _classify_post_run_diff(diff_text: str, status_text: str, config: dict) -> dict:
+    """Classify post-run changes (Phase D D4).  Pure function.
+
+    classification is one of: clean / allowed_changes / unexpected_path /
+    deleted_file / binary_or_large_change / git_metadata_change /
+    secrets_risk / unclear.
+
+    Paths come from `git status --short` output; `diff_text` is used only for
+    binary detection ("Bin" markers in --stat lines).  Untracked files under
+    the existing runtime-exempt folders (state/, inbox/reports/, outbox/tasks/,
+    approvals/, logs/) are treated as runtime artifacts and never block --
+    this conservatively mirrors Gate 4 rather than attempting an exact
+    pre/post snapshot comparison.  Untracked files anywhere else are
+    classified against the allowlist like tracked changes (or blocked
+    outright when block_untracked_files is true).
+    """
+    cfg             = _post_run_cfg(config)
+    allow_root_md   = bool(cfg.get("allow_root_markdown"))
+    block_untracked = bool(cfg.get("block_untracked_files"))
+    block_deleted   = bool(cfg.get("block_deleted_files"))
+    block_binary    = bool(cfg.get("block_binary_files"))
+    allowed = []
+    for p in cfg.get("allowed_path_prefixes", []):
+        if isinstance(p, str) and p.strip():
+            norm_p = p.strip().replace("\\", "/").lower()
+            allowed.append(norm_p if norm_p.endswith("/") else norm_p + "/")
+
+    # Binary paths from "path | Bin ..." lines in git diff --stat output.
+    stat_binary = set()
+    for line in (diff_text or "").splitlines():
+        if "|" in line and "Bin" in line.split("|", 1)[1]:
+            stat_binary.add(line.split("|", 1)[0].strip().replace("\\", "/").lower())
+
+    result = {
+        "classification":   "clean",
+        "safe":             True,
+        "reason":           "no post-run changes detected",
+        "changed_files":    [],
+        "untracked_files":  [],
+        "runtime_untracked": [],
+        "blocked_paths":    [],
+    }
+
+    # --- Parse git status --short entries ---
+    entries = []   # (change, path)
+    violations = []  # (label, path)
+    for line in (status_text or "").splitlines():
+        if not line.strip():
+            continue
+        if len(line) < 4 or line[2] != " ":
+            violations.append(("unclear", line.strip()[:80]))
+            continue
+        xy   = line[:2]
+        path = line[3:].strip().strip('"').replace("\\", "/")
+        if " -> " in path:   # rename: classify both sides
+            old, new = path.split(" -> ", 1)
+            entries.append(("modified", old.strip().strip('"')))
+            path = new.strip().strip('"')
+        if xy == "??":
+            entries.append(("untracked", path))
+        elif "D" in xy:
+            entries.append(("deleted", path))
+        else:
+            entries.append(("modified", path))
+
+    def _label(change: str, path: str) -> str:
+        p = path.lower()
+        base = p.rsplit("/", 1)[-1]
+        if p == ".git" or p.startswith(".git/"):
+            return "git_metadata_change"
+        if base == ".env" or base.startswith(".env."):
+            return "secrets_risk"
+        if any(tok in p for tok in _POST_RUN_SECRET_TOKENS):
+            return "secrets_risk"
+        if "tradingview" in p or "pinescript" in p:
+            return "unexpected_path"
+        if "../" in p or p.startswith("/") or re.match(r"^[a-z]:/", p):
+            return "unexpected_path"
+        if block_binary and (p in stat_binary
+                             or any(p.endswith(ext) for ext in _POST_RUN_BINARY_EXTS)):
+            return "binary_or_large_change"
+        if change == "deleted" and block_deleted:
+            return "deleted_file"
+        if change == "untracked":
+            if any(p.startswith(r) for r in _RUNTIME_FOLDER_EXCEPTIONS):
+                return "runtime_exempt"
+            if block_untracked:
+                return "unexpected_path"
+        if any(p.startswith(a) for a in allowed):
+            return "allowed"
+        if "/" not in p and p.endswith(".md"):
+            return "allowed" if allow_root_md else "unexpected_path"
+        return "unexpected_path"
+
+    for change, path in entries:
+        label = _label(change, path)
+        if label == "runtime_exempt":
+            result["runtime_untracked"].append(path)
+            continue
+        if change == "untracked":
+            result["untracked_files"].append(path)
+        else:
+            result["changed_files"].append(path)
+        if label not in ("allowed",):
+            violations.append((label, path))
+
+    if violations:
+        worst = max(violations, key=lambda v: _POST_RUN_SEVERITY.get(v[0], 1))
+        result["classification"] = worst[0]
+        result["safe"] = False
+        result["blocked_paths"] = [p for _, p in violations][:10]
+        result["reason"] = (
+            f"{worst[0]}: {len(violations)} blocked change(s), "
+            f"e.g. {result['blocked_paths'][:3]}"
+        )
+    elif result["changed_files"] or result["untracked_files"]:
+        n = len(result["changed_files"]) + len(result["untracked_files"])
+        result["classification"] = "allowed_changes"
+        result["reason"] = f"{n} change(s), all within allowed paths"
+    elif result["runtime_untracked"]:
+        result["reason"] = "only runtime-exempt untracked artifacts present"
+
+    return result
+
+
+def _gate_post_run_diff(diff_result: dict, config: dict) -> "tuple[bool, str]":
+    """Gate 9 (Phase D D4): pass only when the post-run diff is safe.
+
+    Disabled config (post_run_diff.enabled false) passes with a note.
+    A non-safe classification (including 'unclear' from a failed capture)
+    blocks, marking the run unsafe even if the invocation itself succeeded.
+    """
+    cfg = _post_run_cfg(config)
+    if not cfg.get("enabled", True):
+        return True, "post-run diff gate disabled by config"
+    cls    = diff_result.get("classification", "unclear")
+    reason = diff_result.get("reason", "")
+    if diff_result.get("safe", False):
+        return True, f"post-run diff {cls}: {reason}"
+    return False, f"post-run diff blocked ({cls}): {reason}"
 
 
 # ---------------------------------------------------------------------------
@@ -632,7 +870,7 @@ def check_and_run(
     # Builds and appends one audit event.  Booleans and gate metadata only;
     # never env values, secrets, or task/command body content.
     def _audit(event_type, gate, gate_result, reason,
-               ran=False, returncode=None, invoked=False):
+               ran=False, returncode=None, invoked=False, post_run_diff=None):
         event = _build_execution_audit_event(
             event_type=event_type,
             mode=mode,
@@ -647,6 +885,7 @@ def check_and_run(
             config=config,
             env=env,
             invoked=invoked,
+            post_run_diff=post_run_diff,
         )
         ok_a, msg_a = _append_execution_audit_log(event, config, base_dir=base_dir)
         if not ok_a:
@@ -693,6 +932,44 @@ def check_and_run(
     logger.info("Runner [EXECUTE]: all gates passed. Invoking Claude Code...")
     ran = _invoke_claude(task_path, config, logger)
     result["ran"] = ran
+
+    # --- Gate 9: Post-run diff review (Phase D D4) ---
+    # Runs only here -- after _invoke_claude() returns in execute mode.
+    # Capture is read-only git; capture failure classifies as 'unclear'
+    # and blocks (fail closed).
+    if _post_run_cfg(config).get("enabled", True):
+        capture = _capture_post_run_diff(base_dir)
+        if capture["ok"]:
+            diff_result = _classify_post_run_diff(
+                capture["diff_text"], capture["status_text"], config)
+        else:
+            diff_result = {
+                "classification": "unclear", "safe": False,
+                "reason": f"diff capture failed: {capture['error']}",
+                "changed_files": [], "untracked_files": [],
+                "runtime_untracked": [], "blocked_paths": [],
+            }
+    else:
+        diff_result = {
+            "classification": "clean", "safe": True,
+            "reason": "post-run diff gate disabled by config",
+            "changed_files": [], "untracked_files": [],
+            "runtime_untracked": [], "blocked_paths": [],
+        }
+    ok9, msg9 = _gate_post_run_diff(diff_result, config)
+    _log_gate(logger, GATE_POST_RUN_DIFF, ok9, msg9)
+    diff_summary = {
+        "classification":          diff_result["classification"],
+        "safe":                    diff_result["safe"],
+        "reason":                  diff_result["reason"][:300],
+        "changed_file_count":      len(diff_result["changed_files"]),
+        "untracked_file_count":    len(diff_result["untracked_files"]),
+        "runtime_untracked_count": len(diff_result["runtime_untracked"]),
+        "blocked_paths":           diff_result["blocked_paths"][:3],
+    }
+    result["post_run_diff"] = diff_summary
+
+    # Post-invocation audit record (D3), extended with the D4 summary.
     ok_audit, audit_msg = _audit(
         "claude_invocation", "none", "passed",
         "claude exited cleanly" if ran else
@@ -700,10 +977,21 @@ def check_and_run(
         ran=ran,
         returncode=0 if ran else 1,
         invoked=True,
+        post_run_diff=diff_summary,
     )
     if not ok_audit:
         # Execution already happened; surface the audit failure, never hide it.
         result["audit_log_error"] = audit_msg
+
+    if ok9:
+        result["checks_passed"].append(GATE_POST_RUN_DIFF)
+        return result
+
+    # D4 blocked: the run is unsafe even though the invocation completed.
+    result["gate_triggered"] = GATE_POST_RUN_DIFF
+    result["checks_failed"].append({"gate": GATE_POST_RUN_DIFF, "reason": msg9})
+    _audit("post_run_diff_blocked", GATE_POST_RUN_DIFF, "blocked", msg9,
+           ran=ran, invoked=True, post_run_diff=diff_summary)
     return result
 
 
