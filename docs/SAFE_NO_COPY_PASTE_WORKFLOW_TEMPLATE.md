@@ -1,8 +1,11 @@
-# Safe No Copy/Paste Workflow Template v1.1
+# Safe No Copy/Paste Workflow Template v1.2
 
-**Version: v1.1** — adds the source/test review tier learned from
-real-use Trial 3: concrete paths classify intent precisely, but
-source/test scope still routes through human review by design.
+**Version: v1.2** — adds portability lessons from a real adoption trial
+in a second project (`telegram-analyzer`): pre-adoption Git boundary
+check, early `.gitignore` protection, command style rule, and
+source-review secret handling. (v1.1 added the source/test review tier
+learned from real-use Trial 3: concrete paths classify intent precisely,
+but source/test scope still routes through human review by design.)
 
 A portable template for a file-mediated, human-gated exchange between a
 planning AI (e.g. ChatGPT) and an executing AI (e.g. Claude Code). Copy
@@ -254,9 +257,82 @@ Fill these in when adopting the template:
 - [ ] Execution boundary policy: `<none, or the separately-approved module
       and signals that gate any real execution>`
 
+## 14a. Pre-adoption Git boundary check
+
+Before installing the workflow into a target project, verify whether the
+target folder is its own Git repo:
+
+- If the target folder has no `.git`, do **not** commit into an enclosing
+  parent repo.
+- If the nearest Git repo is *outside* the target folder, treat it as an
+  **unsafe boundary**.
+- Ask for — or perform — an explicit, dedicated `git init` step inside
+  the target folder before committing adoption docs.
+- Never stage files into an accidental parent/home-directory repo.
+
+## 14b. Early `.gitignore` protection
+
+A new target project should add a protective `.gitignore` **before any
+source review or source commit**, covering at least:
+
+- credentials
+- `.env`
+- session files
+- runtime outputs
+- media exports
+- generated markdown/JSON/PDF outputs
+- local tool settings such as `.claude/`
+- exchange runtime folders (`inbox/exchange/`, `outbox/exchange/`,
+  `state/exchange-*.json`)
+
+## 14c. Command style rule
+
+- Use separate shell/git commands.
+- Do not chain commands with `&&`, `;`, or pipes unless explicitly
+  required.
+- This reduces permission prompts and makes safety review easier.
+
+Good:
+
+```
+git status --short
+git diff --check
+git diff --cached --name-only
+git commit -m "message"
+```
+
+Avoid:
+
+```
+git commit ... && git log ... && git status --short
+```
+
+## 14d. Source-review secret exposure warning
+
+Read-only source review can still expose secrets if credentials are
+hardcoded in untracked source files. Rules:
+
+- Do not print secrets in final reports.
+- If secrets are found, report the **category and location only**, never
+  the values.
+- Treat hardcoded credentials as a high-priority containment issue, but
+  do not modify the files unless explicitly approved.
+
 ## 15. Adoption sequence
 
-Build in this order, each step proven before the next:
+When adopting into a target project, run these phases first:
+
+- **Phase 0A:** verify the Git boundary (§14a)
+- **Phase 0B:** commit the adoption doc only
+- **Phase 0C:** add the protective `.gitignore` (§14b)
+- **Phase 1:** docs-only inventory
+- **Phase 2:** data safety guide
+- **Phase 3:** runbook
+- **Phase 4:** first read-only source review (§14d applies)
+- **Later:** source changes only after explicit approval
+
+Then build the workflow itself in this order, each step proven before
+the next:
 
 1. Schema + pure validator (zero file I/O, tests only)
 2. Dry-run watcher (bounded cycles, fixtures only)
