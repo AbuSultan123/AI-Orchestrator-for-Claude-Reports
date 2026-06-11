@@ -1,4 +1,8 @@
-# Safe No Copy/Paste Workflow Template v1
+# Safe No Copy/Paste Workflow Template v1.1
+
+**Version: v1.1** — adds the source/test review tier learned from
+real-use Trial 3: concrete paths classify intent precisely, but
+source/test scope still routes through human review by design.
 
 A portable template for a file-mediated, human-gated exchange between a
 planning AI (e.g. ChatGPT) and an executing AI (e.g. Claude Code). Copy
@@ -73,9 +77,13 @@ must carry (the example repo's `exchange_schema.py` is one realization):
   rejects drift or tampering
 - `title` / `body` — the spec, treated as data and secret-redacted
 - `expected_output` — what the handoff should produce
-- `allowed_paths` / `forbidden_paths` — scope for the reviewer and executor
+- `allowed_paths` / `forbidden_paths` — scope for the reviewer and
+  executor; projects may name these `allowed_files`, `scope`, or another
+  equivalent allowlist field — the concept matters, not the exact name
 - `guardrails` — mandatory non-empty list of rules the executor must obey
-- `required_tests` — checks the handed-off work must run, if any
+- `required_tests` — optional / project-dependent: checks the handed-off
+  work must run, if the project's schema includes such a field (not every
+  implementation does)
 - `status` — lifecycle state (queued → claimed → reported → archived,
   with terminal blocked/failed/needs_review)
 - `metadata` — free-form, excluded from the hash
@@ -126,6 +134,32 @@ Authoring checklist:
 - [ ] Expected output stated
 - [ ] Stop conditions stated
 - [ ] Push/tag policy explicit
+
+## 8a. Source/test review tier
+
+The authoring rule improves *precision*, not *risk tier* (learned from
+real-use Trial 3):
+
+- Docs-only tasks with concrete `docs/...` paths may classify as
+  `done`/`docs_only` and become handoff-eligible directly.
+- Source/test tasks with concrete `src/...`, module, or `tests/...`
+  paths may still classify as `needs_review` (or the project's
+  equivalent higher-review tier) even when well-authored. This is
+  **expected and desirable** — the escalation is about *what* the task
+  touches, not how it is worded.
+- Concrete paths improve intent precision, but do not automatically
+  reduce risk.
+- A review-only source/test task may be **manually accepted** by the
+  human for handoff if all of the following hold:
+  - it names concrete paths
+  - it requests review/planning only
+  - it does not request file modifications
+  - it does not request execution
+  - it has no blocked reasons or unsafe flags
+- Source/test tasks should include **stronger stop conditions** than
+  docs-only tasks — in particular, the handed-off work must stop and
+  report if it finds itself wanting to modify the named source/test
+  files, not just unexpected ones.
 
 ## 9. Safety invariants (non-negotiable defaults)
 
@@ -245,6 +279,10 @@ Build in this order, each step proven before the next:
   genuinely useful
 - Never commit secrets or raw runtime artifacts by accident — check
   `git status` before every commit
+- Some test suites may assert that no exchange runtime paths exist in
+  the real repo; if so, clean `inbox/exchange/`, `outbox/exchange/`, and
+  `state/exchange-registry.json` before running those suites outside
+  temp-dir fixtures
 
 ## 17. Versioning guidance
 
