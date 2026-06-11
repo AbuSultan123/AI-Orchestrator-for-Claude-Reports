@@ -48,6 +48,41 @@ safe (`requires_human_review: true`; `execution_allowed`,
 field redacted before hashing; validation recomputes the hash and rejects
 drift/tampering.
 
+## Authoring rule: name concrete paths
+
+Learned from the first real-use E1 trial (Trials 1/1B): a vague task body
+may classify as `needs_review` because the dry-run reviewer cannot confirm
+intent from intent words alone. Naming concrete file paths lets the
+watcher classify docs-only / source / test / config work correctly — the
+same task that stalled as `needs_review` with "review the existing X6-E1
+documentation files" passed cleanly as `docs_only`/`done` once it named
+paths like `docs/X6-E1-FINAL-STATUS.md`. Whenever possible, name exact
+`docs/...`, `src/...`, `tests/...`, or config file paths.
+
+Good examples:
+
+* `Review docs/X6-E1-FINAL-STATUS.md and docs/X6-E1E-GUARDED-CLAUDE-HANDOFF.md`
+* `Update tests/test_exchange_schema_x6e1a.py`
+* `Modify exchange_schema.py only`
+
+Weak examples (likely `needs_review`):
+
+* `Review the docs`
+* `Fix the project`
+* `Update the code`
+
+A well-formed task body includes: exact target paths, the allowed change
+type, forbidden paths, the expected output, and stop conditions.
+
+Authoring checklist:
+
+* [ ] Concrete target paths named
+* [ ] Allowed paths stated
+* [ ] Forbidden paths stated
+* [ ] Expected output stated
+* [ ] No execution unless explicitly approved
+* [ ] Push/tag rules explicit
+
 ## Report schema essentials
 
 Bound to the task via `task_id` + `task_hash` (mismatch fails validation);
