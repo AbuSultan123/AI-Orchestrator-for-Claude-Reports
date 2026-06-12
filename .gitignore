@@ -27,6 +27,12 @@ outbox/chatgpt-briefs/archive/*.md
 inbox/chatgpt-commands/*.md
 state/chatgpt-command-history/*.md
 
+# E2-D runtime namespace (user-approved; runtime data, never committed)
+inbox/e2/
+outbox/e2/
+state/e2-registry.json
+state/e2-history/
+
 # Secrets -- never commit
 .env
 
