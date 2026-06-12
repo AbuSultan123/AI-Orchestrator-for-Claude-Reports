@@ -62,6 +62,7 @@ without touching the safety floor.
 - Make next-prompt generation safer than manual re-typing (no
   transcription errors in hashes/tags/paths)
 - Support dry-run first for every slice
+- Keep every future automation slice separately approved
 
 ## 5. Proposed E2 slices
 
@@ -87,10 +88,10 @@ imports, bounded invocation only.
 
 ### E2-C: Human approval checkpoint (manual, file-based)
 
-The user reviews a draft package and **manually approves** it (e.g.
-moves/marks it approved). No auto-run; an unapproved draft is inert
-forever. Approval grants exactly one trip through the dry-run path —
-nothing more.
+The user reviews a draft package and **manually approves, edits, or
+rejects** it (e.g. moves/marks it approved). No auto-run; an unapproved
+or rejected draft is inert forever. Approval grants exactly one trip
+through the dry-run path — nothing more.
 
 ### E2-D: Dry-run loop (reuse E1, no new execution surface)
 
@@ -156,6 +157,11 @@ the same cleanup policy as the E1 exchange paths.
   package "ran". Mitigation: same hard markers as E1
   (`dry_run_only: true`, all-false safety confirmations) in every E2
   report.
+- **Automation drift from v1.2 template rules** — incremental slices
+  could erode the template's protections over time. Mitigation: every
+  implementing prompt restates the v1.2 protections (first GO/NO-GO
+  gate), and each slice is checked against the template before it is
+  tagged.
 
 ## 8. GO/NO-GO gates (before ANY E2 implementation)
 
@@ -167,6 +173,8 @@ the same cleanup policy as the E1 exchange paths.
 - [ ] Every slice starts docs-only or dry-run-only
 - [ ] No live Claude execution anywhere in E2-A through E2-D (and E2-F
       remains design-only)
+- [ ] No OpenAI API by default
+- [ ] No X6-D4 live execution anywhere in E2
 
 ## 9. Recommended first implementation slice
 
@@ -184,13 +192,14 @@ deterministic hashing, redaction, tests only). Explicitly:
 Stop and report instead of proceeding if:
 
 - The repo is not at the expected HEAD for the prompt.
+- The branch is not `main`.
 - The working tree has unexpected tracked modifications.
 - Required input docs are missing.
 - Any design element implies automatic execution before human approval.
 - Any design element requires secrets.
 - Any design element requires the OpenAI API.
 - Any design element requires modifying `bridge.py`,
-  `claude_runner.py`, or X6-D4 code.
+  `claude_runner.py`, X6-D4 code, or runtime execution paths.
 
 **Preflight result:** none of these conditions were triggered — HEAD
 matched, tree clean, all input docs present, and the design above
