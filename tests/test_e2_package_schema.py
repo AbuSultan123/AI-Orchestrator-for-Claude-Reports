@@ -19,7 +19,13 @@ ROOT = Path(__file__).parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+_TESTS_DIR = Path(__file__).parent
+if str(_TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TESTS_DIR))
+
 import e2_package_schema as e2
+from e2_runtime_snapshot import (SNAPSHOT_MISMATCH_MESSAGE,
+                                 snapshot_e2_runtime)
 
 
 _FAKE_KEY = "sk-test-faketestkey1234567890abcdef"
@@ -300,13 +306,13 @@ class TestRedaction(unittest.TestCase):
 class TestSafetyAndIsolation(unittest.TestCase):
 
     def test_no_file_io_side_effects(self):
+        before = snapshot_e2_runtime(ROOT)
         pkg = _pkg()
         e2.validate_e2_handoff_package(pkg)
         e2.canonicalize_e2_package(pkg)
         e2.compute_e2_package_hash(pkg)
-        self.assertFalse((ROOT / "inbox" / "e2").exists())
-        self.assertFalse((ROOT / "outbox" / "e2").exists())
-        self.assertFalse((ROOT / "state" / "e2-registry.json").exists())
+        self.assertEqual(snapshot_e2_runtime(ROOT), before,
+                         SNAPSHOT_MISMATCH_MESSAGE)
 
     def test_source_has_no_subprocess(self):
         source = Path(e2.__file__).read_text(encoding="utf-8")

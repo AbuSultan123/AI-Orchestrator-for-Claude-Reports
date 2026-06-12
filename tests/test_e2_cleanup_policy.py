@@ -20,7 +20,13 @@ ROOT = Path(__file__).parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+_TESTS_DIR = Path(__file__).parent
+if str(_TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TESTS_DIR))
+
 import e2_cleanup_policy as cp
+from e2_runtime_snapshot import (SNAPSHOT_MISMATCH_MESSAGE,
+                                 snapshot_e2_runtime)
 
 
 _NOW = "2026-06-12T00:00:00+00:00"
@@ -341,13 +347,14 @@ class TestApplyBehavior(_CleanupCase):
 class TestSafetyAndIsolation(unittest.TestCase):
 
     def test_no_real_repo_runtime_artifacts(self):
+        """Cleanup planning in temp trees tolerates live-trial artifacts
+        in the real repo and must never plan against or touch them."""
+        before = snapshot_e2_runtime(ROOT)
         cp.get_e2_cleanup_policy()
         with tempfile.TemporaryDirectory() as bare:
             cp.build_e2_cleanup_plan(bare, now=_NOW)
-        self.assertFalse((ROOT / "inbox" / "e2").exists())
-        self.assertFalse((ROOT / "outbox" / "e2").exists())
-        self.assertFalse((ROOT / "state" / "e2-registry.json").exists())
-        self.assertFalse((ROOT / "state" / "e2-history").exists())
+        self.assertEqual(snapshot_e2_runtime(ROOT), before,
+                         SNAPSHOT_MISMATCH_MESSAGE)
 
     def test_source_has_no_subprocess_or_shell(self):
         source = Path(cp.__file__).read_text(encoding="utf-8")

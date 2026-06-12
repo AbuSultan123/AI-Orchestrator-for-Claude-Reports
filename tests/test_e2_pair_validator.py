@@ -16,9 +16,15 @@ ROOT = Path(__file__).parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+_TESTS_DIR = Path(__file__).parent
+if str(_TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TESTS_DIR))
+
 import e2_approval_schema as apv
 import e2_package_schema as e2s
 import e2_pair_validator as pv
+from e2_runtime_snapshot import (SNAPSHOT_MISMATCH_MESSAGE,
+                                 snapshot_e2_runtime)
 
 
 def _package(**task_overrides):
@@ -286,10 +292,10 @@ class TestSafetyAndIsolation(unittest.TestCase):
         self.assertNotIn("mark_e2_approval_expired(", source)
 
     def test_module_use_has_no_side_effects(self):
+        before = snapshot_e2_runtime(ROOT)
         _result()
-        self.assertFalse((ROOT / "inbox" / "e2").exists())
-        self.assertFalse((ROOT / "outbox" / "e2").exists())
-        self.assertFalse((ROOT / "state" / "e2-registry.json").exists())
+        self.assertEqual(snapshot_e2_runtime(ROOT), before,
+                         SNAPSHOT_MISMATCH_MESSAGE)
 
     def test_runtime_modules_do_not_import_pair_validator(self):
         for name in ("bridge.py", "claude_runner.py", "auto_exchange.py"):

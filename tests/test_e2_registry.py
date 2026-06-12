@@ -19,9 +19,15 @@ ROOT = Path(__file__).parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+_TESTS_DIR = Path(__file__).parent
+if str(_TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TESTS_DIR))
+
 import e2_dry_run_report_writer as wr
 import e2_dry_run_schema as dr
 import e2_registry as reg
+from e2_runtime_snapshot import (SNAPSHOT_MISMATCH_MESSAGE,
+                                 snapshot_e2_runtime)
 
 
 _FAKE_KEY = "sk-test-faketestkey1234567890abcdef"
@@ -415,13 +421,14 @@ class TestWriting(_RegistryCase):
 class TestSafetyAndIsolation(unittest.TestCase):
 
     def test_no_real_repo_registry_created(self):
+        """Pure registry operations against the real repo tolerate the
+        live-trial registry and must leave it byte-identical."""
+        before = snapshot_e2_runtime(ROOT)
         registry = reg.empty_e2_registry()
         reg.validate_e2_registry(registry)
         reg.load_e2_registry("state/e2-registry.json", "")
-        self.assertFalse((ROOT / "state" / "e2-registry.json").exists())
-        self.assertFalse((ROOT / "state" / "e2-history").exists())
-        self.assertFalse((ROOT / "inbox" / "e2").exists())
-        self.assertFalse((ROOT / "outbox" / "e2").exists())
+        self.assertEqual(snapshot_e2_runtime(ROOT), before,
+                         SNAPSHOT_MISMATCH_MESSAGE)
 
     def test_source_has_no_subprocess_or_shell(self):
         source = Path(reg.__file__).read_text(encoding="utf-8")

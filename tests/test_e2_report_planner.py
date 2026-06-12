@@ -21,8 +21,14 @@ ROOT = Path(__file__).parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+_TESTS_DIR = Path(__file__).parent
+if str(_TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TESTS_DIR))
+
 import e2_package_schema as e2s
 import e2_report_planner as planner
+from e2_runtime_snapshot import (SNAPSHOT_MISMATCH_MESSAGE,
+                                 snapshot_e2_runtime)
 
 
 _FAKE_KEY = "sk-test-faketestkey1234567890abcdef"
@@ -401,11 +407,11 @@ class TestSafetyAndIsolation(unittest.TestCase):
                              f"planner must not contain {needle!r}")
 
     def test_no_runtime_folders_created(self):
+        before = snapshot_e2_runtime(ROOT)
         draft = _draft()
         planner.validate_e2_next_task_draft(draft)
-        self.assertFalse((ROOT / "inbox" / "e2").exists())
-        self.assertFalse((ROOT / "outbox" / "e2").exists())
-        self.assertFalse((ROOT / "state" / "e2-registry.json").exists())
+        self.assertEqual(snapshot_e2_runtime(ROOT), before,
+                         SNAPSHOT_MISMATCH_MESSAGE)
 
     def test_runtime_modules_do_not_import_planner(self):
         for name in ("bridge.py", "claude_runner.py", "auto_exchange.py"):
