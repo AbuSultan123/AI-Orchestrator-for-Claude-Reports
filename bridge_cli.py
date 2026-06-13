@@ -40,6 +40,8 @@ import json
 import sys
 from pathlib import Path
 
+import bridge_command_schema as cmdschema
+
 INBOX_COMMANDS_DIR = "inbox/chatgpt-commands"
 OUTBOX_REPORTS_DIR = "outbox/claude-reports"
 STATE_BRIDGE_DIR = "state/bridge"
@@ -106,6 +108,120 @@ def _cmd_init(args) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# Command file I/O helpers (read-only except `command new`)
+# ---------------------------------------------------------------------------
+
+def _commands_dir(repo_root) -> Path:
+    return Path(_norm(repo_root)) / INBOX_COMMANDS_DIR
+
+
+def _iter_command_files(repo_root) -> list:
+    directory = _commands_dir(repo_root)
+    if not directory.is_dir():
+        return []
+    return sorted(p for p in directory.glob("*.md") if p.is_file())
+
+
+def _load_command(path) -> "tuple[dict | None, str, str]":
+    file = Path(path)
+    try:
+        text = file.read_text(encoding="utf-8")
+    except OSError:
+        return None, "", "command file could not be read"
+    return cmdschema.parse_command_markdown(text)
+
+
+def _resolve_command(repo_root, cid):
+    """Resolve a command by id.  Returns (status, path, meta, body)
+    where status is 'ok' | 'not_found' | 'ambiguous'.  Prefers an exact
+    command_id match; falls back to a unique substring match."""
+    exact = []
+    partial = []
+    for path in _iter_command_files(repo_root):
+        meta, body, error = _load_command(path)
+        file_id = (meta or {}).get("command_id", "")
+        if error or not file_id:
+            if path.stem == cid:
+                partial.append((path, meta, body))
+            continue
+        if file_id == cid:
+            exact.append((path, meta, body))
+        elif cid and cid in file_id:
+            partial.append((path, meta, body))
+    if len(exact) == 1:
+        path, meta, body = exact[0]
+        return "ok", path, meta, body
+    if len(exact) > 1:
+        return "ambiguous", None, None, None
+    if len(partial) == 1:
+        path, meta, body = partial[0]
+        return "ok", path, meta, body
+    if len(partial) > 1:
+        return "ambiguous", None, None, None
+    return "not_found", None, None, None
+
+
+def _cmd_command_list(args) -> int:
+    files = _iter_command_files(args.repo_root)
+    if not files:
+        print("no commands in inbox/chatgpt-commands/")
+        return 0
+    print(f"{len(files)} command(s) in inbox/chatgpt-commands/:")
+    for path in files:
+        meta, body, error = _load_command(path)
+        if error:
+            print(f"  [invalid] {path.name}: {error}")
+        else:
+            print(f"  {cmdschema.summarize_command(meta)}")
+    return 0
+
+
+def _cmd_command_show(args) -> int:
+    status, path, meta, body = _resolve_command(args.repo_root, args.id)
+    if status == "ambiguous":
+        print(f"ambiguous command id: {args.id}")
+        return 3
+    if status == "not_found":
+        print(f"command not found: {args.id}")
+        return 2
+    meta, body, error = _load_command(path)
+    if error:
+        print(f"command unreadable/invalid: {error}")
+        return 1
+    print(f"file: {_norm(path)}")
+    for field in cmdschema.FRONTMATTER_FIELDS:
+        value = meta.get(field, "")
+        if field == "requires_approval":
+            value = "true" if bool(value) else "false"
+        print(f"  {field}: {value}")
+    print("---- body ----")
+    print(body)
+    return 0
+
+
+def _cmd_command_validate(args) -> int:
+    status, path, meta, body = _resolve_command(args.repo_root, args.id)
+    if status == "ambiguous":
+        print(f"ambiguous command id: {args.id}")
+        return 3
+    if status == "not_found":
+        print(f"command not found: {args.id}")
+        return 2
+    meta, body, error = _load_command(path)
+    if error:
+        print(f"invalid: {error}")
+        return 1
+    valid, errors = cmdschema.validate_command(meta)
+    if valid:
+        print(f"valid: {meta.get('command_id')}")
+        return 0
+    print(f"invalid: {meta.get('command_id', path.name)}")
+    for err in errors:
+        print(f"  - {err}")
+    return 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="bridge_cli",
@@ -118,6 +234,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_init = sub.add_parser("init", help="create bridge folders (idempotent)")
     p_init.set_defaults(func=_cmd_init)
+
+    p_command = sub.add_parser("command", help="command package operations")
+    csub = p_command.add_subparsers(dest="command_action", required=True)
+
+    c_list = csub.add_parser("list", help="list commands (read-only)")
+    c_list.set_defaults(func=_cmd_command_list)
+
+    c_show = csub.add_parser("show", help="show one command (read-only)")
+    c_show.add_argument("--id", required=True, help="command id")
+    c_show.set_defaults(func=_cmd_command_show)
+
+    c_validate = csub.add_parser("validate",
+                                 help="validate one command (read-only)")
+    c_validate.add_argument("--id", required=True, help="command id")
+    c_validate.set_defaults(func=_cmd_command_validate)
 
     return parser
 
