@@ -342,6 +342,28 @@ class TestReportCli(_BridgeCase):
 
 
 # ---------------------------------------------------------------------------
+# G6 status (CLI)
+# ---------------------------------------------------------------------------
+
+class TestStatusCli(_BridgeCase):
+
+    def test_status_empty(self):
+        self._init()
+        code, out = self._run("status")
+        self.assertEqual(code, 0)
+        self.assertIn("bridge status", out)
+        self.assertIn("read-only", out)
+
+    def test_status_reflects_commands_and_reports(self):
+        self._write_command(title="Ready task", body="r")
+        self._write_report()
+        code, out = self._run("status")
+        self.assertEqual(code, 0)
+        self.assertIn("ready=1", out)
+        self.assertIn("total=1", out)
+
+
+# ---------------------------------------------------------------------------
 # Module safety + isolation
 # ---------------------------------------------------------------------------
 

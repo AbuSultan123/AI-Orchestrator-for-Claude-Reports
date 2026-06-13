@@ -42,6 +42,7 @@ from pathlib import Path
 
 import bridge_command_schema as cmdschema
 import bridge_report_schema as repschema
+import bridge_status as bstatus
 import bridge_watcher as watcher
 
 INBOX_COMMANDS_DIR = "inbox/chatgpt-commands"
@@ -357,6 +358,12 @@ def _cmd_watcher_scan(args) -> int:
     return 0
 
 
+def _cmd_status(args) -> int:
+    status = bstatus.build_status(args.repo_root, now=args.now or "")
+    print(bstatus.render_status(status))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="bridge_cli",
@@ -369,6 +376,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_init = sub.add_parser("init", help="create bridge folders (idempotent)")
     p_init.set_defaults(func=_cmd_init)
+
+    p_status = sub.add_parser("status", help="show bridge state (read-only)")
+    p_status.set_defaults(func=_cmd_status)
 
     p_command = sub.add_parser("command", help="command package operations")
     csub = p_command.add_subparsers(dest="command_action", required=True)
