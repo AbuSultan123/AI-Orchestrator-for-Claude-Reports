@@ -150,6 +150,24 @@ class TestBuildHelper(unittest.TestCase):
         self.assertTrue(meta["requires_approval"])
 
 
+class TestExportPrompt(unittest.TestCase):
+
+    def test_export_contains_instruction_block_and_body(self):
+        meta = _meta()
+        body = "Summarize the docs. No execution."
+        prompt = cs.build_export_prompt(meta, body)
+        self.assertIn("SUPERVISED MANUAL HANDOFF", prompt)
+        self.assertIn("claude-fable-5", prompt)
+        self.assertIn("Do not execute generated commands", prompt)
+        self.assertIn(meta["command_id"], prompt)
+        self.assertIn(body, prompt)
+
+    def test_export_emits_no_executable_command(self):
+        prompt = cs.build_export_prompt(_meta(), "body")
+        for needle in ("subprocess", "os.system", "python -c", "&&"):
+            self.assertNotIn(needle, prompt)
+
+
 class TestSafety(unittest.TestCase):
 
     def test_no_io_or_execution_imports(self):

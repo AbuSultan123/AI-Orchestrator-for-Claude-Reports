@@ -225,6 +225,33 @@ def _cmd_command_validate(args) -> int:
     return 1
 
 
+def _cmd_command_export(args) -> int:
+    status, path, meta, body = _resolve_command(args.repo_root, args.id)
+    if status == "ambiguous":
+        print(f"ambiguous command id: {args.id}")
+        return 3
+    if status == "not_found":
+        print(f"command not found: {args.id}")
+        return 2
+    meta, body, error = _load_command(path)
+    if error:
+        print(f"refusing to export invalid command: {error}")
+        return 1
+    valid, errors = cmdschema.validate_command(meta)
+    if not valid:
+        print("refusing to export: command failed validation")
+        for err in errors:
+            print(f"  - {err}")
+        return 1
+    if meta.get("risk") == "high" and not args.show_blocked:
+        print(f"blocked: command {meta.get('command_id')} is high risk.")
+        print("  re-run with --show-blocked to export it anyway "
+              "(review carefully; this only prints text, sends nothing).")
+        return 4
+    print(cmdschema.build_export_prompt(meta, body))
+    return 0
+
+
 def _cmd_command_new(args) -> int:
     body_path = Path(_norm(args.body_file))
     try:
@@ -409,6 +436,13 @@ def build_parser() -> argparse.ArgumentParser:
     approval.add_argument("--no-requires-approval", dest="requires_approval",
                           action="store_false", default=None)
     c_new.set_defaults(func=_cmd_command_new)
+
+    c_export = csub.add_parser(
+        "export", help="print a Claude-ready prompt (no send, no execution)")
+    c_export.add_argument("--id", required=True, help="command id")
+    c_export.add_argument("--show-blocked", action="store_true",
+                          help="export even if the command is high risk")
+    c_export.set_defaults(func=_cmd_command_export)
 
     p_watcher = sub.add_parser("watcher", help="inbox scanning (dry-run)")
     wsub = p_watcher.add_subparsers(dest="watcher_action", required=True)

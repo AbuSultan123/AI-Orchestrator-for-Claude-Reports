@@ -342,6 +342,48 @@ class TestReportCli(_BridgeCase):
 
 
 # ---------------------------------------------------------------------------
+# G7 command export (CLI)
+# ---------------------------------------------------------------------------
+
+class TestCommandExport(_BridgeCase):
+
+    def test_export_low_risk(self):
+        meta, _ = self._write_command(title="Docs task", body="summarize")
+        code, out = self._run("command", "export", "--id",
+                              meta["command_id"])
+        self.assertEqual(code, 0)
+        self.assertIn("SUPERVISED MANUAL HANDOFF", out)
+        self.assertIn("claude-fable-5", out)
+        self.assertIn("task body", out)
+
+    def test_export_high_risk_blocked_by_default(self):
+        meta, _ = self._write_command(title="Risky", body="b", risk="high")
+        code, out = self._run("command", "export", "--id",
+                              meta["command_id"])
+        self.assertEqual(code, 4)
+        self.assertIn("blocked", out)
+        self.assertNotIn("task body", out)
+
+    def test_export_high_risk_with_show_blocked(self):
+        meta, _ = self._write_command(title="Risky", body="b", risk="high")
+        code, out = self._run("command", "export", "--id",
+                              meta["command_id"], "--show-blocked")
+        self.assertEqual(code, 0)
+        self.assertIn("SUPERVISED MANUAL HANDOFF", out)
+
+    def test_export_not_found(self):
+        self._init()
+        code, out = self._run("command", "export", "--id", "cmd-nope")
+        self.assertEqual(code, 2)
+
+    def test_export_does_not_mutate(self):
+        meta, path = self._write_command()
+        before = path.read_bytes()
+        self._run("command", "export", "--id", meta["command_id"])
+        self.assertEqual(path.read_bytes(), before)
+
+
+# ---------------------------------------------------------------------------
 # G6 status (CLI)
 # ---------------------------------------------------------------------------
 

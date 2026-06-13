@@ -188,6 +188,42 @@ def build_command_metadata(*, title: str, body: str, created_at: str,
     }
 
 
+FIXED_INSTRUCTION_BLOCK = (
+    "Use model claude-fable-5.\n"
+    "Inspect the repo state first (git status, branch, HEAD, stable tag).\n"
+    "Proceed only within the task's stated scope and the project "
+    "guardrails.\n"
+    "Do not call the OpenAI API.\n"
+    "Do not execute generated commands.\n"
+    "Do not invoke Claude automatically; this is a manual handoff.\n"
+    "Do not push, tag, release, or open a PR unless the task explicitly "
+    "authorizes it.\n"
+    "Write a report back into outbox/claude-reports/ using the bridge "
+    "report schema, including files changed, checks run, and status.\n"
+    "Stop on unexpected files, unclear scope, failed checks, or any "
+    "guardrail violation, and report instead of proceeding.")
+
+
+def build_export_prompt(meta: dict, body: str) -> str:
+    """Build a clean, Claude-ready manual-handoff prompt.  Pure.
+
+    Carries the fixed instruction block plus the command's metadata and
+    body.  Emits no executable command and never sends anything."""
+    record = meta if isinstance(meta, dict) else {}
+    header = (
+        f"# Claude Code task -- exported from bridge command "
+        f"{record.get('command_id', '?')}\n"
+        "# SUPERVISED MANUAL HANDOFF -- review before giving to Claude "
+        "Code. Nothing is sent automatically.\n")
+    facts = (
+        f"Title: {record.get('title', '')}\n"
+        f"Risk: {record.get('risk', '?')}   "
+        f"Requires approval: {record.get('requires_approval', '?')}   "
+        f"Stable base: {record.get('stable_base', '?')}\n")
+    return (header + "\n" + FIXED_INSTRUCTION_BLOCK + "\n\n" + facts
+            + "\n---- task body ----\n" + str(body).strip("\n") + "\n")
+
+
 def summarize_command(meta: dict) -> str:
     """One-line, secret-free command summary."""
     record = meta if isinstance(meta, dict) else {}
