@@ -3,9 +3,10 @@ e2_dashboard.py -- E2-E: read-only dashboard for the E2 runtime.
 OBSERVATION ONLY -- NO WRITES, NO CONSUMPTION, NO CLEANUP, NO EXECUTION.
 
 Summarizes the current E2 runtime state as an in-memory dict: approved
-queue, dry-run reports, registry, a plan-only cleanup preview, and the
-evidence/checkpoint trail.  Nothing on disk changes; there is no
-dashboard output file.
+queue, dry-run reports, registry, a plan-only cleanup preview, the
+evidence/checkpoint trail, and (E2-F3) a read-only handoff namespace
+inspection via e2_handoff_inspector.  Nothing on disk changes; there is
+no dashboard output file, and a missing handoff namespace is valid.
 
 This module:
   - reads (only) the approved queue, the reports directory, and the
@@ -30,6 +31,7 @@ import json
 from pathlib import Path
 
 import e2_cleanup_policy as cp
+import e2_handoff_inspector as hoff
 import e2_pickup_scanner as scan
 import e2_registry as reg
 
@@ -46,7 +48,8 @@ EVIDENCE_DOCS = (
 
 REQUIRED_SECTIONS = (
     "dashboard_version", "created_at", "runtime", "approved_queue",
-    "reports", "registry", "cleanup_preview", "evidence", "summary",
+    "reports", "registry", "cleanup_preview", "evidence", "handoff",
+    "summary",
     "no_execution_confirmation", "no_claude_confirmation",
     "no_openai_confirmation", "no_x6_d4_confirmation",
 )
@@ -56,11 +59,18 @@ CONFIRMATION_FIELDS = (
     "no_openai_confirmation", "no_x6_d4_confirmation",
 )
 
+HANDOFF_CONFIRMATION_FIELDS = (
+    "read_only_confirmed", "no_folder_creation_confirmed",
+    "no_execution_confirmed", "no_claude_confirmed",
+    "no_openai_confirmed", "no_x6_d4_confirmed",
+)
+
 # Marker keys whose presence would mean a raw runtime payload was
 # embedded; the dashboard must never contain them.
 _RAW_PAYLOAD_MARKERS = (
     '"proposed_next_task"', '"instruction_block"', '"approved_package"',
     '"single_use"', '"safety_flags"', '"entries"', '"actions"',
+    '"package_body"', '"approval_body"', '"report_body"',
 )
 
 _COUNT_FIELDS = (
@@ -187,6 +197,8 @@ def build_e2_dashboard(repo_root, *, now: str) -> dict:
             doc: (root / doc).is_file() for doc in EVIDENCE_DOCS},
     }
 
+    handoff = hoff.build_handoff_inspection(str(root), now=now)
+
     summary = (
         f"E2 runtime: {approved_queue['pair_count']} pair(s) queued "
         f"({approved_queue['eligible_count']} eligible, "
@@ -206,6 +218,7 @@ def build_e2_dashboard(repo_root, *, now: str) -> dict:
         "registry": registry,
         "cleanup_preview": cleanup_preview,
         "evidence": evidence,
+        "handoff": handoff,
         "summary": summary,
         "no_execution_confirmation": True,
         "no_claude_confirmation": True,
@@ -261,6 +274,23 @@ def validate_e2_dashboard(dashboard: dict) -> "tuple[bool, list[str]]":
                 "approved_queue eligible/blocked counts are "
                 "inconsistent with candidate_count")
 
+    handoff = dashboard.get("handoff")
+    if not isinstance(handoff, dict):
+        errors.append("handoff must be a dict")
+    else:
+        if handoff.get("inspection_version") != "E2-F2-v1":
+            errors.append(
+                "handoff.inspection_version must be 'E2-F2-v1'")
+        for field in HANDOFF_CONFIRMATION_FIELDS:
+            if handoff.get(field) is not True:
+                errors.append(f"handoff.{field} must be true")
+        handoff_valid, handoff_errors = (
+            hoff.validate_handoff_inspection(handoff))
+        if not handoff_valid:
+            errors.append(
+                f"handoff inspection failed E2-F2 validation "
+                f"({len(handoff_errors)} error(s))")
+
     serialized = json.dumps(dashboard, ensure_ascii=False)
     for marker in _RAW_PAYLOAD_MARKERS:
         if marker in serialized:
@@ -278,8 +308,25 @@ def summarize_e2_dashboard(dashboard: dict) -> str:
     queue = queue if isinstance(queue, dict) else {}
     registry = record.get("registry", {})
     registry = registry if isinstance(registry, dict) else {}
+    handoff = record.get("handoff", {})
+    handoff = handoff if isinstance(handoff, dict) else {}
+    namespace = handoff.get("namespace", {})
+    namespace = namespace if isinstance(namespace, dict) else {}
+    if namespace.get("exists") is True:
+        lifecycle = handoff.get("lifecycle", {})
+        lifecycle = lifecycle if isinstance(lifecycle, dict) else {}
+        staleness = handoff.get("staleness", {})
+        staleness = staleness if isinstance(staleness, dict) else {}
+        handoff_part = (
+            f"handoff: ready={lifecycle.get('ready', '?')}; "
+            f"blocked={lifecycle.get('blocked', '?')}; "
+            f"reports_received={lifecycle.get('report_received', '?')}; "
+            f"stale_ready={staleness.get('stale_ready_count', '?')}")
+    else:
+        handoff_part = "handoff=missing"
     return (f"e2 dashboard: pairs={queue.get('pair_count', '?')}; "
             f"eligible={queue.get('eligible_count', '?')}; "
             f"blocked={queue.get('blocked_count', '?')}; "
             f"registry_entries={registry.get('entry_count', '?')}; "
+            f"{handoff_part}; "
             "read-only -- nothing was modified or executed")

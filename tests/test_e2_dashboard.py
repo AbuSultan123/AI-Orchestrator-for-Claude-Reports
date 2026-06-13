@@ -326,6 +326,95 @@ class TestReadOnly(_DashCase):
 
 
 # ---------------------------------------------------------------------------
+# E2-F3 handoff section
+# ---------------------------------------------------------------------------
+
+class TestHandoffSection(_DashCase):
+
+    def test_dashboard_includes_handoff_section(self):
+        dashboard = self._dashboard()
+        self.assertIn("handoff", dashboard)
+        self.assertEqual(dashboard["handoff"]["inspection_version"],
+                         "E2-F2-v1")
+
+    def test_missing_handoff_keeps_dashboard_valid(self):
+        dashboard = self._dashboard()
+        self.assertFalse(dashboard["handoff"]["namespace"]["exists"])
+        valid, errors = dash.validate_e2_dashboard(dashboard)
+        self.assertTrue(valid, errors)
+
+    def test_dashboard_does_not_create_handoff(self):
+        self._dashboard()
+        self.assertFalse((self.root / "handoff").exists())
+
+    def test_missing_handoff_has_zero_counts(self):
+        handoff = self._dashboard()["handoff"]
+        self.assertEqual(handoff["files"]["package_count"], 0)
+        self.assertEqual(sum(handoff["lifecycle"].values()), 0)
+        self.assertFalse(handoff["registry"]["exists"])
+
+    def test_summary_says_handoff_missing(self):
+        line = dash.summarize_e2_dashboard(self._dashboard())
+        self.assertIn("handoff=missing", line)
+
+    def test_summary_includes_handoff_counts_when_present(self):
+        queue = self.root / "handoff" / "e2" / "ready"
+        queue.mkdir(parents=True)
+        (queue / "a.ready.json").write_text("{}", encoding="utf-8")
+        line = dash.summarize_e2_dashboard(self._dashboard())
+        self.assertIn("handoff: ready=1", line)
+        self.assertIn("stale_ready=", line)
+
+    def test_validation_fails_if_handoff_missing(self):
+        dashboard = self._dashboard()
+        del dashboard["handoff"]
+        valid, errors = dash.validate_e2_dashboard(dashboard)
+        self.assertFalse(valid)
+
+    def test_validation_fails_if_handoff_version_wrong(self):
+        dashboard = self._dashboard()
+        dashboard["handoff"]["inspection_version"] = "other"
+        valid, errors = dash.validate_e2_dashboard(dashboard)
+        self.assertFalse(valid)
+        self.assertTrue(any("E2-F2-v1" in e for e in errors))
+
+    def test_validation_fails_if_handoff_read_only_false(self):
+        dashboard = self._dashboard()
+        dashboard["handoff"]["read_only_confirmed"] = False
+        valid, errors = dash.validate_e2_dashboard(dashboard)
+        self.assertFalse(valid)
+
+    def test_validation_fails_if_handoff_no_creation_false(self):
+        dashboard = self._dashboard()
+        dashboard["handoff"]["no_folder_creation_confirmed"] = False
+        valid, errors = dash.validate_e2_dashboard(dashboard)
+        self.assertFalse(valid)
+
+    def test_validation_rejects_raw_handoff_payload_markers(self):
+        dashboard = self._dashboard()
+        dashboard["handoff"]["files"]["package_body"] = "{raw}"
+        valid, errors = dash.validate_e2_dashboard(dashboard)
+        self.assertFalse(valid)
+
+    def test_live_tree_handoff_not_created_and_snapshot_identical(self):
+        before = snapshot_e2_runtime(ROOT)
+        dashboard = dash.build_e2_dashboard(str(ROOT), now=_NOW)
+        self.assertEqual(snapshot_e2_runtime(ROOT), before,
+                         SNAPSHOT_MISMATCH_MESSAGE)
+        self.assertFalse((ROOT / "handoff").exists())
+        valid, errors = dash.validate_e2_dashboard(dashboard)
+        self.assertTrue(valid, errors)
+
+    def test_dashboard_imports_inspector_only(self):
+        source = Path(dash.__file__).read_text(encoding="utf-8")
+        self.assertIn("import e2_handoff_inspector", source)
+        for needle in ("import bridge", "import claude_runner",
+                       "import auto_exchange", "runner"):
+            self.assertNotIn(needle, source,
+                             f"dashboard must not contain {needle!r}")
+
+
+# ---------------------------------------------------------------------------
 # Module safety + isolation
 # ---------------------------------------------------------------------------
 

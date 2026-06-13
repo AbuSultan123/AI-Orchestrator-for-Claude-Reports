@@ -53,8 +53,22 @@ Trial 2's binding-blocked pair appear side by side, with the registry's
 | `registry` | exists flag, registry version, entry count, status counts, registry hash — never the entries |
 | `cleanup_preview` | plan-only D6 pass: action/eligible/blocked counts, namespaces, `apply_false_confirmed: true`, `cleanup_run: false` |
 | `evidence` | stable base tag + presence flags for the four milestone docs |
+| `handoff` | (E2-F3) the full E2-F2 read-only handoff inspection — namespace existence, folder/file counts, lifecycle, registry metadata, staleness |
 | `summary` | concise human-readable status with the recommended next step |
 | confirmations | the four hardwired true no-execution confirmations |
+
+## F3 handoff section
+
+Added by E2-F3 (`docs/E2-F3-DASHBOARD-INTEGRATION.md`): the dashboard
+embeds the E2-F2 inspector's output (`build_handoff_inspection`) as a
+`handoff` section. A **missing** `handoff/` namespace is valid — the
+section reports `exists: false` with zero counts, and the summary line
+says `handoff=missing`. The integration inherits every F2 guarantee:
+**read-only** (the inspector never writes), **no folder creation** (the
+namespace is never created by inspection), and **no runner** (F4+
+remain future design work). Dashboard validation additionally requires
+the F2 inspection version, all six F2 no-action confirmations true, a
+passing F2 validation, and no raw handoff payload markers.
 
 ## Validation rules
 
