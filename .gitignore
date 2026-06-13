@@ -33,6 +33,11 @@ outbox/e2/
 state/e2-registry.json
 state/e2-history/
 
+# E2-G no-copy bridge runtime (generated locally; .gitkeep is tracked)
+# (inbox/chatgpt-commands/*.md already ignored above)
+outbox/claude-reports/*.md
+state/bridge/*.json
+
 # Secrets -- never commit
 .env
 
