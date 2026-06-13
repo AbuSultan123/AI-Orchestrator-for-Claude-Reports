@@ -41,6 +41,7 @@ import sys
 from pathlib import Path
 
 import bridge_command_schema as cmdschema
+import bridge_report_schema as repschema
 import bridge_watcher as watcher
 
 INBOX_COMMANDS_DIR = "inbox/chatgpt-commands"
@@ -262,6 +263,83 @@ def _cmd_command_new(args) -> int:
     return 0
 
 
+def _reports_dir(repo_root) -> Path:
+    return Path(_norm(repo_root)) / OUTBOX_REPORTS_DIR
+
+
+def _iter_report_files(repo_root) -> list:
+    directory = _reports_dir(repo_root)
+    if not directory.is_dir():
+        return []
+    return sorted(p for p in directory.glob("*.md") if p.is_file())
+
+
+def _load_report(path) -> "tuple[dict | None, str, str]":
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return None, "", "report file could not be read"
+    return repschema.parse_report_markdown(text)
+
+
+def _resolve_report(repo_root, rid):
+    exact = []
+    partial = []
+    for path in _iter_report_files(repo_root):
+        meta, body, error = _load_report(path)
+        file_id = (meta or {}).get("report_id", "")
+        if error or not file_id:
+            if path.stem == rid:
+                partial.append((path, meta, body))
+            continue
+        if file_id == rid:
+            exact.append((path, meta, body))
+        elif rid and rid in file_id:
+            partial.append((path, meta, body))
+    if len(exact) == 1:
+        return ("ok",) + exact[0]
+    if len(exact) > 1 or len(partial) > 1:
+        return "ambiguous", None, None, None
+    if len(partial) == 1:
+        return ("ok",) + partial[0]
+    return "not_found", None, None, None
+
+
+def _cmd_report_list(args) -> int:
+    files = _iter_report_files(args.repo_root)
+    if not files:
+        print("no reports in outbox/claude-reports/")
+        return 0
+    print(f"{len(files)} report(s) in outbox/claude-reports/:")
+    for path in files:
+        meta, body, error = _load_report(path)
+        if error:
+            print(f"  [invalid] {path.name}: {error}")
+        else:
+            print(f"  {repschema.summarize_report(meta)}")
+    return 0
+
+
+def _cmd_report_show(args) -> int:
+    status, path, meta, body = _resolve_report(args.repo_root, args.id)
+    if status == "ambiguous":
+        print(f"ambiguous report id: {args.id}")
+        return 3
+    if status == "not_found":
+        print(f"report not found: {args.id}")
+        return 2
+    meta, body, error = _load_report(path)
+    if error:
+        print(f"report unreadable/invalid: {error}")
+        return 1
+    print(f"file: {_norm(path)}")
+    for field in repschema.REPORT_FRONTMATTER_FIELDS:
+        print(f"  {field}: {meta.get(field, '')}")
+    print("---- body ----")
+    print(body)
+    return 0
+
+
 def _cmd_watcher_scan(args) -> int:
     results = watcher.scan_command_dir(_commands_dir(args.repo_root),
                                        now=args.now or "")
@@ -328,6 +406,14 @@ def build_parser() -> argparse.ArgumentParser:
     w_scan.add_argument("--dry-run", action="store_true", default=True,
                         help="dry-run only (the only supported mode)")
     w_scan.set_defaults(func=_cmd_watcher_scan)
+
+    p_report = sub.add_parser("report", help="report package operations")
+    rsub = p_report.add_subparsers(dest="report_action", required=True)
+    r_list = rsub.add_parser("list", help="list reports (read-only)")
+    r_list.set_defaults(func=_cmd_report_list)
+    r_show = rsub.add_parser("show", help="show one report (read-only)")
+    r_show.add_argument("--id", required=True, help="report id")
+    r_show.set_defaults(func=_cmd_report_show)
 
     return parser
 

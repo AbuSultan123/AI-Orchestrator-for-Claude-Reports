@@ -23,6 +23,7 @@ if str(ROOT) not in sys.path:
 
 import bridge_cli as cli
 import bridge_command_schema as cs
+import bridge_report_schema as rs
 
 
 class _BridgeCase(unittest.TestCase):
@@ -46,6 +47,19 @@ class _BridgeCase(unittest.TestCase):
         path = (self.root / cli.INBOX_COMMANDS_DIR
                 / f"{meta['command_id']}.md")
         path.write_text(cs.render_command_markdown(meta, body),
+                        encoding="utf-8")
+        return meta, path
+
+    def _write_report(self, command_id="cmd-summarize-docs-a1b2c3d4",
+                      status="completed", body="Done. No execution."):
+        self._init()
+        meta = rs.build_report_metadata(
+            report_id="rpt-bridge-0001", command_id=command_id,
+            created_at="2026-06-13T01:00:00+00:00", status=status,
+            commit="abc1234", branch="main", tests="1241 OK")
+        path = (self.root / cli.OUTBOX_REPORTS_DIR
+                / f"{meta['report_id']}.md")
+        path.write_text(rs.render_report_markdown(meta, body),
                         encoding="utf-8")
         return meta, path
 
@@ -286,6 +300,44 @@ class TestWatcherCli(_BridgeCase):
         meta, path = self._write_command()
         before = path.read_bytes()
         self._run("watcher", "scan", "--dry-run")
+        self.assertEqual(path.read_bytes(), before)
+
+
+# ---------------------------------------------------------------------------
+# G5 report list / show (CLI)
+# ---------------------------------------------------------------------------
+
+class TestReportCli(_BridgeCase):
+
+    def test_report_list_empty(self):
+        self._init()
+        code, out = self._run("report", "list")
+        self.assertEqual(code, 0)
+        self.assertIn("no reports", out)
+
+    def test_report_list_shows_report(self):
+        meta, _ = self._write_report()
+        code, out = self._run("report", "list")
+        self.assertEqual(code, 0)
+        self.assertIn(meta["report_id"], out)
+
+    def test_report_show(self):
+        meta, _ = self._write_report()
+        code, out = self._run("report", "show", "--id", meta["report_id"])
+        self.assertEqual(code, 0)
+        self.assertIn(meta["report_id"], out)
+        self.assertIn("body", out)
+
+    def test_report_show_not_found(self):
+        self._init()
+        code, out = self._run("report", "show", "--id", "rpt-missing")
+        self.assertEqual(code, 2)
+
+    def test_report_list_read_only(self):
+        meta, path = self._write_report()
+        before = path.read_bytes()
+        self._run("report", "list")
+        self._run("report", "show", "--id", meta["report_id"])
         self.assertEqual(path.read_bytes(), before)
 
 
