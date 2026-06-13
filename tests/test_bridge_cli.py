@@ -259,6 +259,37 @@ class TestCommandNew(_BridgeCase):
 
 
 # ---------------------------------------------------------------------------
+# G4 watcher scan (CLI)
+# ---------------------------------------------------------------------------
+
+class TestWatcherCli(_BridgeCase):
+
+    def test_scan_empty(self):
+        self._init()
+        code, out = self._run("watcher", "scan", "--dry-run")
+        self.assertEqual(code, 0)
+        self.assertIn("dry-run", out)
+        self.assertIn("no commands", out)
+
+    def test_scan_reports_states(self):
+        ready, _ = self._write_command(title="Ready task", body="r")
+        blocked, _ = self._write_command(title="Risky task", body="b",
+                                         risk="high")
+        code, out = self._run("watcher", "scan", "--dry-run")
+        self.assertEqual(code, 0)
+        self.assertIn("[ready]", out)
+        self.assertIn("[blocked]", out)
+        self.assertIn("ready=1", out)
+        self.assertIn("blocked=1", out)
+
+    def test_scan_is_read_only(self):
+        meta, path = self._write_command()
+        before = path.read_bytes()
+        self._run("watcher", "scan", "--dry-run")
+        self.assertEqual(path.read_bytes(), before)
+
+
+# ---------------------------------------------------------------------------
 # Module safety + isolation
 # ---------------------------------------------------------------------------
 

@@ -41,6 +41,7 @@ import sys
 from pathlib import Path
 
 import bridge_command_schema as cmdschema
+import bridge_watcher as watcher
 
 INBOX_COMMANDS_DIR = "inbox/chatgpt-commands"
 OUTBOX_REPORTS_DIR = "outbox/claude-reports"
@@ -261,6 +262,23 @@ def _cmd_command_new(args) -> int:
     return 0
 
 
+def _cmd_watcher_scan(args) -> int:
+    results = watcher.scan_command_dir(_commands_dir(args.repo_root),
+                                       now=args.now or "")
+    counts = watcher.summarize_scan(results)
+    print("watcher scan (dry-run -- nothing executed, nothing changed):")
+    if not results:
+        print("  no commands in inbox/chatgpt-commands/")
+    for item in results:
+        line = f"  [{item['state']}] {item['command_id']}"
+        if item["reasons"]:
+            line += " -- " + "; ".join(item["reasons"])
+        print(line)
+    print(f"  totals: ready={counts['ready']} blocked={counts['blocked']} "
+          f"invalid={counts['invalid']} total={counts['total']}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="bridge_cli",
@@ -303,6 +321,13 @@ def build_parser() -> argparse.ArgumentParser:
     approval.add_argument("--no-requires-approval", dest="requires_approval",
                           action="store_false", default=None)
     c_new.set_defaults(func=_cmd_command_new)
+
+    p_watcher = sub.add_parser("watcher", help="inbox scanning (dry-run)")
+    wsub = p_watcher.add_subparsers(dest="watcher_action", required=True)
+    w_scan = wsub.add_parser("scan", help="dry-run scan of the command inbox")
+    w_scan.add_argument("--dry-run", action="store_true", default=True,
+                        help="dry-run only (the only supported mode)")
+    w_scan.set_defaults(func=_cmd_watcher_scan)
 
     return parser
 
