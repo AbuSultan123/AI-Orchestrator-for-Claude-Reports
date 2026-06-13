@@ -184,6 +184,81 @@ class TestCommandCli(_BridgeCase):
 
 
 # ---------------------------------------------------------------------------
+# G3 command new
+# ---------------------------------------------------------------------------
+
+class TestCommandNew(_BridgeCase):
+
+    def _body_file(self, text="Docs-only task. Nothing executes."):
+        self._init()
+        bf = self.root / "task.md"
+        bf.write_text(text, encoding="utf-8")
+        return bf
+
+    def test_new_creates_pending_command(self):
+        bf = self._body_file()
+        code, out = self._run("command", "new", "--title", "My task",
+                              "--body-file", str(bf))
+        self.assertEqual(code, 0)
+        self.assertIn("command created", out)
+        files = list((self.root / cli.INBOX_COMMANDS_DIR).glob("*.md"))
+        self.assertEqual(len(files), 1)
+        meta, body, error = cli._load_command(files[0])
+        self.assertEqual(error, "")
+        self.assertEqual(meta["status"], "pending")
+        valid, errors = cs.validate_command(meta)
+        self.assertTrue(valid, errors)
+
+    def test_new_filename_is_command_id(self):
+        bf = self._body_file()
+        self._run("command", "new", "--title", "Deterministic",
+                  "--body-file", str(bf))
+        files = list((self.root / cli.INBOX_COMMANDS_DIR).glob("*.md"))
+        meta, _, _ = cli._load_command(files[0])
+        self.assertEqual(files[0].name, meta["command_id"] + ".md")
+
+    def test_new_refuses_overwrite(self):
+        bf = self._body_file("identical body")
+        code1, _ = self._run("command", "new", "--title", "Same",
+                             "--body-file", str(bf))
+        self.assertEqual(code1, 0)
+        code2, out2 = self._run("command", "new", "--title", "Same",
+                               "--body-file", str(bf))
+        self.assertEqual(code2, 1)
+        self.assertIn("refusing to overwrite", out2)
+
+    def test_new_includes_stable_base(self):
+        bf = self._body_file()
+        self._run("command", "new", "--title", "Tagged",
+                  "--body-file", str(bf), "--stable-base", "tag-x")
+        files = list((self.root / cli.INBOX_COMMANDS_DIR).glob("*.md"))
+        meta, _, _ = cli._load_command(files[0])
+        self.assertEqual(meta["stable_base"], "tag-x")
+
+    def test_new_missing_body_file_fails(self):
+        self._init()
+        code, out = self._run("command", "new", "--title", "x",
+                              "--body-file", str(self.root / "nope.md"))
+        self.assertEqual(code, 1)
+
+    def test_new_high_risk_requires_approval(self):
+        bf = self._body_file()
+        self._run("command", "new", "--title", "Risky",
+                  "--body-file", str(bf), "--risk", "high")
+        files = list((self.root / cli.INBOX_COMMANDS_DIR).glob("*.md"))
+        meta, _, _ = cli._load_command(files[0])
+        self.assertTrue(meta["requires_approval"])
+
+    def test_new_does_not_execute_or_create_handoff(self):
+        bf = self._body_file()
+        self._run("command", "new", "--title", "Safe", "--body-file",
+                  str(bf))
+        self.assertFalse((self.root / "handoff").exists())
+        self.assertFalse((self.root / "outbox" / "claude-reports"
+                          / "anything.md").exists())
+
+
+# ---------------------------------------------------------------------------
 # Module safety + isolation
 # ---------------------------------------------------------------------------
 

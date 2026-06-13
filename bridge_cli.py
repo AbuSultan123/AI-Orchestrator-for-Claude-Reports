@@ -222,6 +222,45 @@ def _cmd_command_validate(args) -> int:
     return 1
 
 
+def _cmd_command_new(args) -> int:
+    body_path = Path(_norm(args.body_file))
+    try:
+        body = body_path.read_text(encoding="utf-8")
+    except OSError:
+        print(f"body file could not be read: {args.body_file}")
+        return 1
+    if not body.strip():
+        print("body file is empty")
+        return 1
+    meta = cmdschema.build_command_metadata(
+        title=args.title, body=body, created_at=args.now or "",
+        stable_base=args.stable_base or "unspecified",
+        risk=args.risk,
+        requires_approval=(None if args.requires_approval is None
+                           else args.requires_approval))
+    valid, errors = cmdschema.validate_command(meta)
+    if not valid:
+        print("refusing to create: built command failed validation")
+        for err in errors:
+            print(f"  - {err}")
+        return 1
+    directory = _commands_dir(args.repo_root)
+    directory.mkdir(parents=True, exist_ok=True)
+    target = directory / f"{meta['command_id']}.md"
+    if target.exists():
+        print(f"refusing to overwrite existing command: {_norm(target)}")
+        return 1
+    target.write_text(cmdschema.render_command_markdown(meta, body),
+                      encoding="utf-8")
+    print("command created:")
+    print(f"  id:   {meta['command_id']}")
+    print(f"  file: {_norm(target)}")
+    print(f"  risk={meta['risk']} approval={meta['requires_approval']} "
+          f"status={meta['status']}")
+    print("  not executed; not sent to Claude; pending human review")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="bridge_cli",
@@ -249,6 +288,21 @@ def build_parser() -> argparse.ArgumentParser:
                                  help="validate one command (read-only)")
     c_validate.add_argument("--id", required=True, help="command id")
     c_validate.set_defaults(func=_cmd_command_validate)
+
+    c_new = csub.add_parser("new", help="create a new pending command file")
+    c_new.add_argument("--title", required=True, help="command title")
+    c_new.add_argument("--body-file", required=True,
+                       help="path to a Markdown file with the task body")
+    c_new.add_argument("--risk", default="low",
+                       choices=list(cmdschema.RISK_VALUES))
+    c_new.add_argument("--stable-base", default="",
+                       help="stable base tag/commit (default: unspecified)")
+    approval = c_new.add_mutually_exclusive_group()
+    approval.add_argument("--requires-approval", dest="requires_approval",
+                          action="store_true", default=None)
+    approval.add_argument("--no-requires-approval", dest="requires_approval",
+                          action="store_false", default=None)
+    c_new.set_defaults(func=_cmd_command_new)
 
     return parser
 
