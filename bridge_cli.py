@@ -142,7 +142,7 @@ def _iter_command_files(repo_root) -> list:
 def _load_command(path) -> "tuple[dict | None, str, str]":
     file = Path(path)
     try:
-        text = file.read_text(encoding="utf-8")
+        text = file.read_text(encoding="utf-8-sig")
     except OSError:
         return None, "", "command file could not be read"
     return cmdschema.parse_command_markdown(text)
@@ -268,7 +268,9 @@ def _cmd_command_export(args) -> int:
 def _cmd_command_new(args) -> int:
     body_path = Path(_norm(args.body_file))
     try:
-        body = body_path.read_text(encoding="utf-8")
+        # utf-8-sig strips a leading BOM if the body file was authored
+        # with one, so the new command never embeds a stray U+FEFF.
+        body = body_path.read_text(encoding="utf-8-sig")
     except OSError:
         print(f"body file could not be read: {args.body_file}")
         return 1
@@ -317,7 +319,7 @@ def _iter_report_files(repo_root) -> list:
 
 def _load_report(path) -> "tuple[dict | None, str, str]":
     try:
-        text = Path(path).read_text(encoding="utf-8")
+        text = Path(path).read_text(encoding="utf-8-sig")
     except OSError:
         return None, "", "report file could not be read"
     return repschema.parse_report_markdown(text)

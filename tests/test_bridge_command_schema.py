@@ -86,6 +86,21 @@ class TestRenderParse(unittest.TestCase):
         self.assertIsNone(meta)
         self.assertIn("closing", error)
 
+    def test_leading_bom_in_body_is_stripped(self):
+        meta = _meta()
+        text = cs.render_command_markdown(meta, "﻿Body after a BOM.")
+        parsed, parsed_body, error = cs.parse_command_markdown(text)
+        self.assertEqual(error, "")
+        self.assertFalse(parsed_body.startswith("﻿"))
+        self.assertEqual(parsed_body, "Body after a BOM.")
+
+    def test_leading_bom_on_file_still_parses(self):
+        meta = _meta()
+        text = "﻿" + cs.render_command_markdown(meta, "body")
+        parsed, _, error = cs.parse_command_markdown(text)
+        self.assertEqual(error, "")
+        self.assertEqual(parsed["command_id"], meta["command_id"])
+
     def test_bad_bool_errors(self):
         text = ("---\ncommand_id: cmd-x-00000000\ncreated_at: t\n"
                 "title: t\nstatus: pending\nrisk: low\n"

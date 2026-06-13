@@ -82,6 +82,9 @@ def parse_command_markdown(text) -> "tuple[dict | None, str, str]":
     other fields are strings."""
     if not isinstance(text, str) or not text.strip():
         return None, "", "command file is empty"
+    # Strip a leading UTF-8 BOM so a BOM-prefixed file still parses (the
+    # opening fence check is exact); see also the body BOM strip below.
+    text = text.lstrip("﻿")
     lines = text.splitlines()
     # Find the opening fence (allow leading blank lines).
     idx = 0
@@ -115,7 +118,10 @@ def parse_command_markdown(text) -> "tuple[dict | None, str, str]":
         else:
             meta[key] = value
 
-    body = "\n".join(lines[end + 1:]).strip("\n")
+    # A body file authored with a BOM leaves a stray U+FEFF at the start
+    # of the body section; drop it so it never propagates into export
+    # output (where it crashes printing on non-UTF-8 consoles).
+    body = "\n".join(lines[end + 1:]).strip("\n").lstrip("﻿")
     return meta, body, ""
 
 
