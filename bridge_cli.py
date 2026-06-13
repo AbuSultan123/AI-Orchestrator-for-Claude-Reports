@@ -38,6 +38,7 @@ Python 3.8+ standard library only.
 import argparse
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import bridge_command_schema as cmdschema
@@ -57,6 +58,18 @@ STATE_MARKER_VERSION = "E2-G-bridge-state-v1"
 
 def _norm(path) -> str:
     return str(path).strip().replace("\\", "/")
+
+
+def _resolve_now(args) -> str:
+    """Return the caller-supplied --now, or a fresh UTC ISO timestamp.
+
+    The schema stays pure (created_at is caller-supplied data); the CLI
+    is the right place to read the clock so `command new` always writes
+    a valid, non-empty created_at when --now is omitted."""
+    supplied = getattr(args, "now", "") or ""
+    if supplied.strip():
+        return supplied
+    return datetime.now(timezone.utc).isoformat()
 
 
 def init_bridge(repo_root, *, now: str = "") -> dict:
@@ -263,7 +276,7 @@ def _cmd_command_new(args) -> int:
         print("body file is empty")
         return 1
     meta = cmdschema.build_command_metadata(
-        title=args.title, body=body, created_at=args.now or "",
+        title=args.title, body=body, created_at=_resolve_now(args),
         stable_base=args.stable_base or "unspecified",
         risk=args.risk,
         requires_approval=(None if args.requires_approval is None

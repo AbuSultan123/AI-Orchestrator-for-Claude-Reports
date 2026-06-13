@@ -9,6 +9,7 @@ file I/O is exercised in temp dirs; the real repo is never mutated by
 tests, and `handoff/` must remain nonexistent.
 """
 
+import argparse
 import io
 import json
 import sys
@@ -68,6 +69,14 @@ class _BridgeCase(unittest.TestCase):
         stdout, return (exit_code, output)."""
         full = ["--repo-root", str(self.root), "--now",
                 "2026-06-13T00:00:00+00:00", *argv]
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = cli.main(full)
+        return code, buf.getvalue()
+
+    def _run_no_now(self, *argv):
+        """Run the CLI WITHOUT --now, exercising the default timestamp."""
+        full = ["--repo-root", str(self.root), *argv]
         buf = io.StringIO()
         with redirect_stdout(buf):
             code = cli.main(full)
@@ -270,6 +279,41 @@ class TestCommandNew(_BridgeCase):
         self.assertFalse((self.root / "handoff").exists())
         self.assertFalse((self.root / "outbox" / "claude-reports"
                           / "anything.md").exists())
+
+    def test_created_at_is_not_empty_for_command_new(self):
+        """Regression (E2-G3 fix): `command new` without --now must still
+        produce a valid, non-empty created_at and pass validation."""
+        bf = self._body_file()
+        code, out = self._run_no_now("command", "new", "--title",
+                                     "No now supplied", "--body-file",
+                                     str(bf))
+        self.assertEqual(code, 0, out)
+        self.assertIn("command created", out)
+        files = list((self.root / cli.INBOX_COMMANDS_DIR).glob("*.md"))
+        self.assertEqual(len(files), 1)
+        meta, _, error = cli._load_command(files[0])
+        self.assertEqual(error, "")
+        self.assertTrue(meta["created_at"].strip(),
+                        "created_at must be non-empty")
+        valid, errors = cs.validate_command(meta)
+        self.assertTrue(valid, errors)
+        # And it validates through the CLI as well.
+        vcode, vout = self._run_no_now("command", "validate", "--id",
+                                       meta["command_id"])
+        self.assertEqual(vcode, 0)
+        self.assertIn("valid", vout)
+
+    def test_resolve_now_defaults_to_utc_iso(self):
+        ns = argparse.Namespace(now="")
+        resolved = cli._resolve_now(ns)
+        self.assertTrue(resolved.strip())
+        self.assertIn("T", resolved)  # ISO-like
+        self.assertIn("+00:00", resolved)  # UTC
+
+    def test_resolve_now_honours_supplied_value(self):
+        ns = argparse.Namespace(now="2026-06-13T00:00:00+00:00")
+        self.assertEqual(cli._resolve_now(ns),
+                         "2026-06-13T00:00:00+00:00")
 
 
 # ---------------------------------------------------------------------------
